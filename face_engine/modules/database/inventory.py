@@ -1,0 +1,63 @@
+# built-in dependencies
+from typing import TypedDict, Type, Dict
+
+# project dependencies
+from face_engine.modules.database.types import Database
+from face_engine.modules.database.postgres import PostgresClient
+from face_engine.modules.database.pgvector import PGVectorClient
+from face_engine.modules.database.mongo import MongoDbClient as MongoClient
+from face_engine.modules.database.weaviate import WeaviateClient
+from face_engine.modules.database.neo4j import Neo4jClient
+from face_engine.modules.database.pinecone import PineconeClient
+from face_engine.modules.database.milvus import MilvusClient
+from face_engine.modules.database.qdrant import QdrantClient
+
+
+class DatabaseSpec(TypedDict):
+    is_vector_db: bool
+    connection_string: str
+    client: Type["Database"]
+
+
+database_inventory: Dict[str, DatabaseSpec] = {
+    "postgres": {
+        "is_vector_db": False,
+        "connection_string": "DEEPFACE_POSTGRES_URI",
+        "client": PostgresClient,
+    },
+    "mongo": {
+        "is_vector_db": False,
+        "connection_string": "DEEPFACE_MONGO_URI",
+        "client": MongoClient,
+    },
+    "weaviate": {
+        "is_vector_db": True,
+        "connection_string": "DEEPFACE_WEAVIATE_URI",
+        "client": WeaviateClient,
+    },
+    "neo4j": {
+        "is_vector_db": True,
+        "connection_string": "DEEPFACE_NEO4J_URI",
+        "client": Neo4jClient,
+    },
+    "pgvector": {
+        "is_vector_db": True,
+        "connection_string": "DEEPFACE_POSTGRES_URI",
+        "client": PGVectorClient,
+    },
+    "pinecone": {
+        "is_vector_db": True,
+        "connection_string": "DEEPFACE_PINECONE_API_KEY",
+        "client": PineconeClient,
+    },
+    "milvus": {
+        "is_vector_db": True,
+        "connection_string": "DEEPFACE_MILVUS_URI",
+        "client": MilvusClient,
+    },
+    "qdrant": {
+        "is_vector_db": True,
+        "connection_string": "DEEPFACE_QDRANT_URI",
+        "client": QdrantClient,
+    },
+}

@@ -1,0 +1,52 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual envs / package manager ---
+.venv/
+venv/
+Pipfile
+Pipfile.lock
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- Editors / OS ---
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Model runtime artifacts (downloaded model weights) ---
+.deepface/
+weights/
+*.h5
+*.onnx
+*.dat
+*.pb
+*.tflite
+
+# --- Generated / transient project data (pipeline outputs) ---
+downloads/
+candidates/
+results/
+outputs/
+evidence/
+tests/unit/dataset/*.pkl
+*.md 
