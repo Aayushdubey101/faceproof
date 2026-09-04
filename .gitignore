@@ -43,10 +43,10 @@ weights/
 *.tflite
 
 # --- Generated / transient project data (pipeline outputs) ---
-downloads/
-candidates/
-results/
-outputs/
-evidence/
+/downloads/
+/candidates/
+/results/
+/outputs/
+/evidence/
 tests/unit/dataset/*.pkl
-*.md 
+*.md
