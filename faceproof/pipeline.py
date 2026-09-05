@@ -10,18 +10,20 @@ point: the evidence is checkable long after the search is gone.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shutil
 import sys
 import tempfile
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
 from faceproof.blockchain import registry
 from faceproof.blockchain import verifier as chain_verifier
-from faceproof.discovery.retrieval import upload_probe
+from faceproof.discovery import DiscoveryError, retrieval
 from faceproof.discovery.reverse_search import SEARCH_ENGINE_ID, reverse_search
 from faceproof.evidence import hashing, manifest
 from faceproof.face import adapter
@@ -29,6 +31,10 @@ from faceproof.matching import verifier as face_verifier
 
 EVIDENCE_DIR = "evidence"
 REQUIRED_KEYS = ("evidence", "fingerprint", "anchor")
+
+# the tamper demo edits this display-only field of an in-memory copy
+TAMPER_FIELD = ("post", "title")
+TAMPER_SUFFIX = " [edited]"
 
 TICK = "✓"
 CROSS = "✗"
@@ -38,14 +44,23 @@ def _mark(ok: bool) -> str:
     return TICK if ok else CROSS
 
 
+def _kilobytes(path: str) -> int:
+    return round(os.path.getsize(path) / 1024)
+
+
 def run(
     image_path: str,
     evidence_dir: str = EVIDENCE_DIR,
     max_candidates: int = face_verifier.MAX_CANDIDATES,
     model_name: str = adapter.DEFAULT_MODEL,
     detector_backend: str = adapter.DEFAULT_DETECTOR,
+    investigation: Optional[face_verifier.Investigation] = None,
 ) -> Dict[str, Any]:
-    """Run every stage end to end and persist an anchored evidence file."""
+    """Run every stage end to end and persist an anchored evidence file.
+
+    Pass an `Investigation` to collect what happened to each candidate; it is
+    filled in place, so it survives a run that ends with no verified match.
+    """
     if not os.path.isfile(image_path):
         raise FileNotFoundError(image_path)
 
@@ -53,18 +68,26 @@ def run(
     probe_scan = adapter.scan_face(image_path, model_name, detector_backend)
     probe_digest = hashing.sha256_file(image_path)
     print(f"      {TICK} Face detected       {probe_scan['faces_detected']} face(s)")
-    print(
-        f"      {TICK} Embedding generated {probe_scan['embedding_dimensions']}-d {model_name}"
-    )
+    print(f"      {TICK} Embedding generated {probe_scan['embedding_dimensions']}-d {model_name}")
 
     print("[2/5] Web discovery")
-    probe_url = upload_probe(image_path)
-    print(f"      {TICK} Probe published     {probe_url}")
+    provider = retrieval.selected_provider()
+    with tempfile.TemporaryDirectory(prefix="faceproof-probe-") as upload_dir:
+        # only what leaves the machine is resized; the original stays the probe
+        upload_path = retrieval.optimize_probe(image_path, upload_dir)
+        print(
+            f"      {TICK} Probe optimized     {_kilobytes(image_path)} KB -> "
+            f"{_kilobytes(upload_path)} KB (max {retrieval.MAX_PROBE_PIXELS}px JPEG)"
+        )
+        probe_url = retrieval.upload_probe(upload_path, provider)
+    print(f"      {TICK} Probe published     [{provider}] {probe_url}")
     candidates, search_response = reverse_search(probe_url)
     if not candidates:
-        raise RuntimeError("reverse image search returned no candidates")
+        raise DiscoveryError(SEARCH_ENGINE_ID, "the search returned no candidates for this probe")
     social = sum(1 for candidate in candidates if candidate.is_social)
     print(f"      {TICK} Candidates found    {len(candidates)} ({social} on social platforms)")
+    if investigation is not None:
+        investigation.discovered = len(candidates)
 
     print(f"[3/5] Candidate verification (up to {max_candidates} candidates)")
     work_dir = tempfile.mkdtemp(prefix="faceproof-")
@@ -76,6 +99,8 @@ def run(
             model_name=model_name,
             detector_backend=detector_backend,
             max_candidates=max_candidates,
+            investigation=investigation,
+            probe_embedding=probe_scan["embedding"],  # encoded once, at [1/5]
         )
         if match is None:
             raise RuntimeError("no candidate passed face verification - try another probe image")
@@ -145,47 +170,107 @@ def _load_document(evidence_path: str) -> Dict[str, Any]:
     return document
 
 
-def verify(evidence_path: str, rpc_url: Optional[str] = None) -> bool:
-    """Recompute the fingerprint locally and check it against the chain."""
-    document = _load_document(evidence_path)
+@dataclass(frozen=True)
+class Audit:
+    """Everything one independent re-check of an evidence file concluded.
 
+    A check is None when the file carries nothing to check it against - an
+    older evidence file without a stored search response is not a failure.
+    """
+
+    document: Dict[str, Any]
+    stored_fingerprint: str
+    local_fingerprint: str
+    onchain_fingerprint: str
+    tx_hash: str
+    search_ok: Optional[bool] = None
+    image_ok: Optional[bool] = None
+
+    @property
+    def local_ok(self) -> bool:
+        return self.local_fingerprint == self.stored_fingerprint
+
+    @property
+    def onchain_ok(self) -> bool:
+        return self.local_fingerprint == self.onchain_fingerprint
+
+    @property
+    def passed(self) -> bool:
+        checks = (self.local_ok, self.search_ok, self.image_ok, self.onchain_ok)
+        return all(check is not False for check in checks)
+
+
+def audit(evidence_path: str, rpc_url: Optional[str] = None) -> Audit:
+    """Recompute the fingerprint locally and read the anchored one off the chain.
+
+    The caller decides how to report it - `verify` prints, the UI renders.
+    """
+    document = _load_document(evidence_path)
     evidence = document["evidence"]
     recomputed = hashing.fingerprint(evidence)
-    stored = document["fingerprint"]
-    local_ok = recomputed == stored
-    print(f"{_mark(local_ok)} Local evidence integrity")
-    print(f"    stored      {stored}")
-    print(f"    recomputed  {recomputed}")
 
-    search_ok = True
+    search_ok: Optional[bool] = None
     if "search_response" in document:
         search_digest = hashing.sha256_bytes(hashing.canonical_json(document["search_response"]))
         search_ok = search_digest == evidence.get("search", {}).get("response_sha256")
-        print(f"{_mark(search_ok)} Search response integrity")
 
-    image_ok = True
+    image_ok: Optional[bool] = None
     artifact = document.get("artifacts", {}).get("match_image")
     if artifact:
         image_path = os.path.join(os.path.dirname(evidence_path), artifact)
         if os.path.isfile(image_path):
             expected = evidence.get("post", {}).get("image_sha256")
             image_ok = hashing.sha256_file(image_path) == expected
-            print(f"{_mark(image_ok)} Matched image integrity")
 
     anchor = document["anchor"]
     tx_hash = anchor.get("tx_hash") if isinstance(anchor, dict) else None
     if not tx_hash:
         raise ValueError(f"{evidence_path} has no anchor transaction hash")
 
-    onchain = chain_verifier.verify_onchain(recomputed, tx_hash, rpc_url)
-    print(f"{TICK} Blockchain anchor")
-    print(f"    tx          {tx_hash}")
-    print(f"    on-chain    {onchain['onchain_digest']}")
-    print(f"{_mark(onchain['matches'])} Fingerprint comparison")
+    onchain = chain_verifier.verify_onchain(recomputed, str(tx_hash), rpc_url)
+    return Audit(
+        document=document,
+        stored_fingerprint=str(document["fingerprint"]),
+        local_fingerprint=recomputed,
+        onchain_fingerprint=str(onchain["onchain_digest"]),
+        tx_hash=str(tx_hash),
+        search_ok=search_ok,
+        image_ok=image_ok,
+    )
 
-    passed = local_ok and search_ok and image_ok and onchain["matches"]
-    print(f"\nRESULT: {'VERIFIED' if passed else 'TAMPERED'}")
-    return passed
+
+def tamper(evidence: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Edit one display-only field of a *copy* and refingerprint it.
+
+    Nothing is written back. The demo has to show that modification is
+    detected, not damage the evidence it is demonstrating on.
+    """
+    section, key = TAMPER_FIELD
+    modified = copy.deepcopy(evidence)
+    block = modified.setdefault(section, {})
+    block[key] = f"{block.get(key, '')}{TAMPER_SUFFIX}"
+    return modified, hashing.fingerprint(modified)
+
+
+def verify(evidence_path: str, rpc_url: Optional[str] = None) -> bool:
+    """Report an `audit` on stdout and return whether it passed."""
+    report = audit(evidence_path, rpc_url)
+
+    print(f"{_mark(report.local_ok)} Local evidence integrity")
+    print(f"    stored      {report.stored_fingerprint}")
+    print(f"    recomputed  {report.local_fingerprint}")
+    if report.search_ok is not None:
+        print(f"{_mark(report.search_ok)} Search response integrity")
+    if report.image_ok is not None:
+        print(f"{_mark(report.image_ok)} Matched image integrity")
+
+    print(f"{TICK} Blockchain anchor")
+    print(f"    tx          {report.tx_hash}")
+    print(f"    on-chain    {report.onchain_fingerprint}")
+    print(f"{_mark(report.onchain_ok)} Fingerprint comparison")
+
+    print(f"\nRESULT: {'VERIFIED' if report.passed else 'TAMPERED'}")
+    return report.passed
 
 
 def main(argv: Optional[List[str]] = None) -> int:

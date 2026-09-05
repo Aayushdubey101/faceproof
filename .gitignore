@@ -50,3 +50,4 @@ weights/
 /evidence/
 tests/unit/dataset/*.pkl
 *.md
+LICENSE

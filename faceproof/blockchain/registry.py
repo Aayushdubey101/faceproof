@@ -12,7 +12,7 @@ lookup-by-person becomes a requirement.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from faceproof.evidence.hashing import DIGEST_BYTES
 
@@ -37,7 +37,7 @@ def anchor(
     digest_hex: str,
     rpc_url: Optional[str] = None,
     private_key: Optional[str] = None,
-) -> dict:
+) -> Dict[str, Any]:
     """Write the evidence fingerprint to the chain. Returns the receipt details."""
     digest = bytes.fromhex(digest_hex)
     if len(digest) != DIGEST_BYTES:
