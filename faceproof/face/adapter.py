@@ -7,7 +7,7 @@ deferred because loading the tensor backend is slow and `verify` never needs it.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Sequence, Union, cast
 
 DEFAULT_MODEL = "ArcFace"
 DEFAULT_DETECTOR = "retinaface"
@@ -20,6 +20,11 @@ def scan_face(
     detector_backend: str = DEFAULT_DETECTOR,
 ) -> Dict[str, Any]:
     """Detect, align and encode the face in `image_path`.
+
+    The returned `embedding` is the probe vector itself, so a caller can compare
+    against it without paying for detection and encoding again. It is None when
+    the image holds several faces: the foundation then compares every probe face
+    against every candidate face, and one vector cannot stand in for that.
 
     Raises ValueError when the image contains no usable face.
     """
@@ -34,9 +39,12 @@ def scan_face(
     if not embeddings:
         raise ValueError(f"no face detected in {image_path}")
 
-    primary = embeddings[0]
+    # represent() is typed as either shape; a single image always yields the flat one
+    primary = cast(Dict[str, Any], embeddings[0])
+    single_face = len(embeddings) == 1
     return {
         "faces_detected": len(embeddings),
+        "embedding": [float(value) for value in primary["embedding"]] if single_face else None,
         "embedding_dimensions": len(primary["embedding"]),
         "facial_area": primary["facial_area"],
         "model": model_name,
@@ -45,7 +53,7 @@ def scan_face(
 
 
 def compare_faces(
-    probe_path: str,
+    probe: Union[str, Sequence[float]],
     candidate_path: str,
     model_name: str = DEFAULT_MODEL,
     detector_backend: str = DEFAULT_DETECTOR,
@@ -53,18 +61,24 @@ def compare_faces(
 ) -> Dict[str, Any]:
     """Compare two faces. Returns {verified, distance, threshold}.
 
+    `probe` is either an image path or an embedding from `scan_face`. The
+    foundation scores both forms through the same distance and threshold, so a
+    pre-encoded probe only skips work - it does not change the verdict.
+
     Raises ValueError when the candidate image contains no detectable face -
     the caller decides whether that means "skip" or "fail".
     """
     from face_engine import DeepFace  # deferred: loading the tensor backend is slow
 
+    probe_input: Union[str, List[float]] = probe if isinstance(probe, str) else list(probe)
     result = DeepFace.verify(
-        img1_path=probe_path,
+        img1_path=probe_input,
         img2_path=candidate_path,
         model_name=model_name,
         detector_backend=detector_backend,
         distance_metric=distance_metric,
         enforce_detection=True,
+        silent=True,  # a pre-encoded probe is deliberate here, not worth a warning
     )
     return {
         "verified": bool(result["verified"]),
