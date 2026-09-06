@@ -85,3 +85,18 @@ def compare_faces(
         "distance": float(result["distance"]),
         "threshold": float(result["threshold"]),
     }
+
+
+def verification_threshold(
+    model_name: str = DEFAULT_MODEL,
+    distance_metric: str = DEFAULT_METRIC,
+) -> float:
+    """Retrieve the authoritative threshold for a given model and distance metric.
+
+    Queries the face-recognition foundation directly so that FaceProof never
+    maintains a duplicate or desynchronized threshold configuration.
+    """
+    from face_engine.modules.verification import find_threshold
+
+    return float(find_threshold(model_name, distance_metric))
+
