@@ -1,0 +1,2 @@
+{% from "components/candidate_card.html" import candidate_card %}
+{% for candidate in candidates %}{{ candidate_card(candidate) }}{% endfor %}

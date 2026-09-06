@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "components/status_chip.html" import status_chip %}
+
+{% block content %}
+<header class="hero">
+  <h1 class="hero-title">Evidence Archive</h1>
+  <p class="hero-sub">Every fingerprinted investigation on disk, newest first.</p>
+</header>
+
+{% if items %}
+<div class="archive-bar">
+  <input type="search" id="archive-search" class="search" placeholder="Search source, domain or fingerprint…" autocomplete="off">
+  <div class="filters" id="archive-filters">
+    <button type="button" class="filter active" data-filter="all">All</button>
+    <button type="button" class="filter" data-filter="verified">Verified</button>
+    <button type="button" class="filter" data-filter="tampered">Tampered</button>
+    <button type="button" class="filter" data-filter="social">Social Platform</button>
+  </div>
+</div>
+
+<div class="archive" id="archive">
+  {% for item in items %}
+  <article class="record"
+           data-verified="{{ '1' if item.verified else '0' }}"
+           data-tampered="{{ '0' if item.intact else '1' }}"
+           data-social="{{ '1' if item.is_social else '0' }}"
+           data-text="{{ (item.source ~ ' ' ~ item.domain ~ ' ' ~ item.fingerprint ~ ' ' ~ item.title)|lower }}">
+    <div class="record-thumb">
+      {% if item.match_image %}
+      <img src="{{ item.match_image }}" alt="Matched image" loading="lazy">
+      {% else %}
+      <span class="record-thumb-empty">&#9634;</span>
+      {% endif %}
+    </div>
+    <div class="record-main">
+      <div class="record-head">
+        {% if item.page_url %}
+        <a class="record-source" href="{{ item.page_url }}" target="_blank" rel="noreferrer noopener">{{ item.source }}</a>
+        {% else %}
+        <span class="record-source">{{ item.source }}</span>
+        {% endif %}
+        <span class="record-date mono">{{ item.discovered_at[:10] }}</span>
+      </div>
+      <dl class="kv">
+        <div class="kv-wide"><dt>Fingerprint</dt><dd class="mono">{{ item.fingerprint[:16] }}…</dd></div>
+      </dl>
+    </div>
+    <div class="record-side">
+      {% if not item.intact %}
+        {{ status_chip('TAMPERED', 'bad') }}
+      {% else %}
+        {{ status_chip('VERIFIED' if item.verified else 'NO MATCH', 'ok' if item.verified else 'warn') }}
+      {% endif %}
+      <a class="btn btn-outline btn-sm" href="{{ url_for('replay_view', investigation_id=item.id) }}">Replay</a>
+      <a class="btn btn-ghost btn-sm" href="{{ url_for('verify_page', file=item.file) }}">Verify</a>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+<p class="empty" id="archive-empty" hidden><span class="empty-glyph">&#9634;</span>No records match that filter.</p>
+{% else %}
+<section class="panel">
+  <p class="empty"><span class="empty-glyph">&#9634;</span>No evidence yet.
+    <a href="{{ url_for('index') }}">Run an investigation</a> to create the first record.</p>
+</section>
+{% endif %}
+{% endblock %}

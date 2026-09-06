@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% from "components/status_chip.html" import status_chip %}
+{% from "components/provenance.html" import provenance %}
+{% from "components/blockchain_card.html" import blockchain_card %}
+{% from "components/evidence_details.html" import evidence_details %}
+{% from "components/candidate_card.html" import candidate_card %}
+
+{% block title %}FaceProof — Cached Replay ({{ replay.investigation_id }}){% endblock %}
+
+{% block content %}
+<header class="hero replay-hero">
+  <div class="replay-badge-container">
+    <span class="replay-badge">CACHED REPLAY</span>
+    {% if not replay.overall_integrity_ok %}
+      {{ status_chip('INTEGRITY WARNING', 'bad') }}
+    {% elif replay.is_match %}
+      {{ status_chip('RECORDED MATCH', 'ok') }}
+    {% else %}
+      {{ status_chip('RECORDED NO MATCH', 'warn') }}
+    {% endif %}
+  </div>
+  <h1 class="hero-title">Cached Investigation Replay</h1>
+  <p class="hero-sub">Deterministic inspection of persisted evidence from the local archive.</p>
+</header>
+
+<!-- Replay Notice Panel (Transparent to Judges) -->
+<section class="panel replay-banner">
+  <div class="replay-notice">
+    <div class="replay-notice-title">
+      <span class="panel-glyph">&#9888;</span>
+      <strong>No new web search or face verification was performed.</strong>
+    </div>
+    <p class="replay-notice-text">
+      This view reconstructs the recorded investigation from persisted evidence. Replay represents the historical recorded investigation and should not be interpreted as a fresh view of the current web.
+    </p>
+  </div>
+
+  <div class="replay-meta-grid">
+    <div class="meta-cell">
+      <span class="meta-label">Investigation ID</span>
+      <span class="meta-value mono">{{ replay.investigation_id }}</span>
+    </div>
+    <div class="meta-cell">
+      <span class="meta-label">Original Evidence Date</span>
+      <span class="meta-value mono">{{ replay.discovered_at }}</span>
+    </div>
+    <div class="meta-cell">
+      <span class="meta-label">Evidence SHA-256</span>
+      <span class="meta-value mono break" title="{{ replay.fingerprint }}">{{ replay.fingerprint[:24] }}…</span>
+    </div>
+    <div class="meta-cell">
+      <span class="meta-label">Blockchain Anchor</span>
+      <span class="meta-value mono break">
+        {% if replay.anchor.tx_hash %}
+          {{ replay.anchor.network }} ({{ replay.anchor.tx_hash[:16] }}…)
+        {% else %}
+          None recorded
+        {% endif %}
+      </span>
+    </div>
+  </div>
+</section>
+
+<!-- Cache & Local Integrity Status -->
+<section class="panel integrity-status-panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#9634;</span>Cache &amp; Artifact Integrity</h2>
+  <div class="status-grid">
+    <div class="status-cell {{ 'is-ok' if replay.manifest_ok else 'is-bad' }}">
+      <div class="status-indicator">
+        <span class="status-icon">{{ '✓' if replay.manifest_ok else '✗' }}</span>
+        <strong>Evidence Manifest</strong>
+      </div>
+      <p class="status-desc">{{ 'Fingerprint matches canonical JSON' if replay.manifest_ok else 'CACHED DATA INTEGRITY FAILURE: Manifest modified' }}</p>
+    </div>
+
+    <div class="status-cell {{ 'is-ok' if replay.search_response_ok else ('is-bad' if replay.search_response_ok is false else 'is-neutral') }}">
+      <div class="status-indicator">
+        <span class="status-icon">{{ '✓' if replay.search_response_ok else ('✗' if replay.search_response_ok is false else '—') }}</span>
+        <strong>Search Response Proof</strong>
+      </div>
+      <p class="status-desc">
+        {% if replay.search_response_ok is true %}
+          Integrity verified against recorded SHA-256
+        {% elif replay.search_response_ok is false %}
+          CACHED DATA INTEGRITY FAILURE: Search proof modified
+        {% else %}
+          No raw search response stored
+        {% endif %}
+      </p>
+    </div>
+
+    <div class="status-cell {{ 'is-ok' if replay.match_image_state == 'VERIFIED' else ('is-bad' if replay.match_image_state == 'INTEGRITY_FAILED' else 'is-neutral') }}">
+      <div class="status-indicator">
+        <span class="status-icon">{{ '✓' if replay.match_image_state == 'VERIFIED' else ('✗' if replay.match_image_state == 'INTEGRITY_FAILED' else '!') }}</span>
+        <strong>Matched Image Artifact</strong>
+      </div>
+      <p class="status-desc">
+        {% if replay.match_image_state == 'VERIFIED' %}
+          Available and SHA-256 verified locally
+        {% elif replay.match_image_state == 'INTEGRITY_FAILED' %}
+          Available locally but SHA-256 integrity failed
+        {% else %}
+          Not locally available (remote URL preserved)
+        {% endif %}
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- Task 6: Explainable Match Scoring (Reused for Best Match) -->
+{% with candidate = replay.best_candidate, model = replay.match.model or 'ArcFace', anchor = anchor_json %}
+  {% include "fragments/best.html" %}
+{% endwith %}
+
+<!-- Discovered Candidates from Recorded Investigation -->
+{% if replay.candidates %}
+<section class="panel">
+  <div class="panel-head-row">
+    <h2 class="panel-title"><span class="panel-glyph">&#9635;</span>Discovered Candidates ({{ replay.candidates|length }})</h2>
+    <span class="subtle-note mono">Reconstructed from recorded search proof</span>
+  </div>
+  <p class="panel-desc">
+    Candidates returned by web search during the original investigation. Verification is decided solely by ArcFace cosine distance.
+  </p>
+  <div class="cand-grid">
+    {% for cand in replay.candidates %}
+      {{ candidate_card(cand) }}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<!-- Task 5: Recorded Investigation Provenance -->
+{{ provenance(replay.events, title="Recorded Investigation Provenance", subtitle="These events occurred during the original investigation and are reconstructed from persisted evidence.") }}
+
+<!-- Blockchain Anchor Card -->
+{{ blockchain_card(anchor_json) }}
+
+<!-- Evidence Details JSON Preview -->
+{{ evidence_details(replay.summary) }}
+
+<!-- Investigation Actions (Replay vs Verify vs Fresh) -->
+<section class="panel replay-actions-panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#8644;</span>Actions</h2>
+  <div class="action-buttons-row">
+    <a class="btn btn-primary" href="{{ url_for('verify_page', file=replay.investigation_id ~ '.json') }}">
+      Verify Integrity on Blockchain
+    </a>
+    <a class="btn btn-outline" href="{{ url_for('index') }}">
+      Run Fresh Investigation
+    </a>
+    <a class="btn btn-ghost" href="{{ url_for('evidence_index') }}">
+      Back to Evidence Archive
+    </a>
+  </div>
+</section>
+{% endblock %}

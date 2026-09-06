@@ -1,471 +1,624 @@
-"""Streamlit UI for exercising the FaceProof pipeline.
+"""Flask UI for the FaceProof pipeline.
 
 A thin shell over `faceproof.pipeline` - no logic of its own, so the UI can
 never disagree with the CLI. Run it with:
 
-    uv run streamlit run app.py
+    uv run flask --app app run --port 8000
 
-ponytail: pipeline stdout is mirrored into a text block rather than rendered as
-real progress widgets. Swap in st.status/st.progress if the stage output stops
-being readable.
+The pipeline takes minutes, so a run happens on a background thread and the
+page polls `/api/run` for stdout and per-candidate outcomes.
+
+ponytail: one run at a time, held in process memory. This is a single-operator
+demo; add a job table keyed by session id if it ever serves two people at once.
 """
 
 from __future__ import annotations
 
 import contextlib
-import glob
 import io
 import json
 import logging
 import os
 import tempfile
-from typing import Any, Callable, List, Optional, Tuple
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-import streamlit as st
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request, send_from_directory, url_for
 
 from faceproof import pipeline
 from faceproof.blockchain import registry
 from faceproof.discovery import DiscoveryError, retrieval
+from faceproof.evidence import hashing, provenance
+from faceproof.evidence.replay import (
+    InvestigationNotFoundError,
+    InvestigationSecurityError,
+    load_replay,
+)
+from faceproof.face import adapter
+from faceproof.matching import (
+    distance_scale_percent,
+    explain_candidate,
+    explain_dict,
+    explain_result,
+)
 from faceproof.matching import verifier as face_verifier
 
 EXPLORER_TX_URL = "https://sepolia.basescan.org/tx/"
-PROBE_TYPES = ["jpg", "jpeg", "png", "webp"]
+ALLOWED_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+CANDIDATE_CHOICES = (5, 10, 15, 20, 25, 30, 40, 50)
 
-TAGLINE = "Discover. Verify. Fingerprint. Audit."
+# stdout lines that close a stage; timestamped as the pipeline prints them, so
+# every duration the UI shows is measured rather than estimated
+STAGE_MARKERS = ("Face detected", "Candidates found", "Verified match", "Fingerprint ", "Anchored ")
 
-LOG = logging.getLogger("faceproof.app")  # developer diagnostics, not shown in the UI
-CARDS_PER_ROW = 3
-
-TRUST_MODEL = (
-    "Web search discovers candidates. Face matching independently verifies the facial "
-    "similarity. SHA-256 fingerprints the evidence package. Base Sepolia anchors that "
-    "fingerprint so later verification can detect modification. "
-    "**Blockchain verification does not prove real-world identity.**"
-)
-
-HOW_IT_WORKS = """**How FaceProof verifies candidates**
-
-Google Lens finds visually related images. FaceProof does not trust that ranking.
-Each candidate image is independently processed with ArcFace and compared against
-the probe. Only candidates passing the configured threshold become evidence."""
-
-FINGERPRINT_NOTE = (
-    "FaceProof fingerprints the evidence package with SHA-256. The fingerprint is anchored "
-    "on Base Sepolia so the evidence can later be independently checked for tampering."
-)
-
-SCOPE_NOTE = (
-    "Face matching establishes the facial similarity result. Blockchain establishes evidence "
-    "integrity and provenance. Blockchain does NOT prove that the person is who they claim to be."
-)
-
-WHAT_THIS_PROVES = """**What this proves**
-
-- Face matching verifies that the discovered image contains a sufficiently similar face.
-- SHA-256 fingerprints the evidence package.
-- Base Sepolia stores the fingerprint anchor.
-- Independent verification recomputes the fingerprint and compares it with the blockchain record.
-
-Blockchain verification detects evidence modification; it does not establish real-world identity
-by itself."""
-
-# the five steps a reviewer walks in the Verify tab, in order
-FLOW_STEPS = (
-    ("1 · Select evidence", "the file on disk"),
-    ("2 · Recompute SHA-256", "hash it again, locally"),
-    ("3 · Read blockchain", "fetch the anchored digest"),
-    ("4 · Compare", "local vs on-chain"),
-    ("5 · Verdict", "VERIFIED or TAMPERED"),
-)
-
-# the tamper demo, as a vertical chain: what was hashed -> digest -> chain -> verdict
-INTACT_CHAIN = ("ORIGINAL EVIDENCE", "SHA-256", "ON-CHAIN SHA-256")
-TAMPERED_CHAIN = ("MODIFIED EVIDENCE", "NEW SHA-256", "ON-CHAIN SHA-256")
-
-# label + badge colour per candidate outcome, keyed by the matching layer's statuses
-STATUS_STYLES = {
-    face_verifier.MATCH: ("✓ VERIFIED", "green"),
-    face_verifier.NO_MATCH: ("✗ REJECTED", "red"),
-    face_verifier.NO_FACE: ("✗ NO FACE", "red"),
-    face_verifier.DOWNLOAD_FAILED: ("⚠ SKIPPED", "orange"),
+# label + tone per candidate outcome, keyed by the matching layer's statuses
+STATUS_LABELS = {
+    # red is reserved for a failed download; a rejection is a normal outcome, not an error
+    face_verifier.MATCH: ("VERIFIED", "ok"),
+    face_verifier.NO_MATCH: ("REJECTED", "neutral"),
+    face_verifier.NO_FACE: ("NO FACE", "neutral"),
+    face_verifier.DOWNLOAD_FAILED: ("SKIPPED", "bad"),
 }
 
+LOG = logging.getLogger("faceproof.app")  # developer diagnostics, never shown in the UI
+
 load_dotenv()
-st.set_page_config(page_title="FaceProof", page_icon="🔗", layout="wide")
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 
-class _LiveOutput(io.TextIOBase):
-    """Mirror pipeline stdout into a Streamlit placeholder as it is produced."""
+class Job(io.StringIO):
+    """One pipeline run, doubling as the sink its stdout is redirected into."""
 
-    def __init__(self, placeholder: Any) -> None:
-        self._placeholder = placeholder
-        self._chunks: List[str] = []
+    def __init__(self, probe_path: str, max_candidates: int) -> None:
+        super().__init__()
+        self.probe_path = probe_path
+        self.max_candidates = max_candidates
+        self.investigation = face_verifier.Investigation()
+        self.state = "running"
+        self.document: Optional[Dict[str, Any]] = None
+        self.error: Optional[Dict[str, Any]] = None
+        self.started = time.perf_counter()
+        self.finished: Optional[float] = None
+        self.marks: Dict[str, float] = {}  # marker -> seconds into the run
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds this run has been going, frozen at whatever it took to end."""
+        return self.finished if self.finished is not None else time.perf_counter() - self.started
 
     def write(self, text: str) -> int:
-        self._chunks.append(text)
-        self._placeholder.code("".join(self._chunks), language="text")
-        return len(text)
+        """Timestamp a stage as the pipeline announces it, then store the line."""
+        for marker in STAGE_MARKERS:
+            if marker not in self.marks and marker in text:
+                self.marks[marker] = time.perf_counter() - self.started
+        return super().write(text)
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            with contextlib.redirect_stdout(self):
+                self.document = pipeline.run(
+                    self.probe_path,
+                    max_candidates=self.max_candidates,
+                    investigation=self.investigation,
+                )
+            self.state = "done"
+        except (RuntimeError, ValueError, FileNotFoundError, OSError) as error:
+            # full traceback to the developer console, never to the evaluator
+            LOG.exception("pipeline run failed")
+            self.error = _describe(error)
+            self.state = "failed"
+        finally:
+            self.finished = time.perf_counter() - self.started
 
 
-def _stream(
-    function: Callable[..., Any], *args: Any, **kwargs: Any
-) -> Tuple[Any, Optional[Exception]]:
-    """Call a pipeline function with its output streamed. Returns (result, error).
+_JOB: Optional[Job] = None
+_JOB_LOCK = threading.Lock()
 
-    The exception itself is returned, not its text: the caller renders a
-    discovery outage differently from a pipeline failure.
+
+@dataclass(frozen=True)
+class _SimulatedAudit:
+    """What an audit *would* report about the tampered copy.
+
+    The tamper demo edits a copy in memory, so there is no real audit of it to
+    read - but the two numbers that decide the verdict are real: the digest the
+    edited copy hashes to, and the digest actually anchored on chain. Artifact
+    checks are None because a simulated edit says nothing about the files on
+    disk, which were never touched.
     """
-    output = _LiveOutput(st.empty())
-    try:
-        with contextlib.redirect_stdout(output):
-            return function(*args, **kwargs), None
-    except (RuntimeError, ValueError, FileNotFoundError, OSError) as error:
-        # full traceback to the developer console, never to the evaluator
-        LOG.exception("%s failed", getattr(function, "__name__", "pipeline"))
-        return None, error
+
+    local_fingerprint: str
+    onchain_fingerprint: str
+    tx_hash: str
+    search_ok: Optional[bool] = None
+    image_ok: Optional[bool] = None
+
+    @property
+    def local_ok(self) -> bool:
+        return False  # the copy no longer hashes to the stored fingerprint
+
+    @property
+    def onchain_ok(self) -> bool:
+        return self.local_fingerprint == self.onchain_fingerprint
+
+    @property
+    def passed(self) -> bool:
+        return self.onchain_ok
 
 
-def _show_error(error: Exception) -> None:
+def _describe(error: Exception) -> Dict[str, Any]:
     """Render a failure for a non-developer: no traceback, no secrets."""
     if not isinstance(error, DiscoveryError):
-        st.error(str(error))
-        return
-
-    st.error("Web discovery unavailable")
-    lines = [
-        f"- **Provider** `{error.provider}`",
-        f"- **Reason** {error.reason}",
-    ]
+        return {"title": str(error), "detail": []}
+    detail = [f"Provider: {error.provider}", f"Reason: {error.reason}"]
     if error.timeout:
-        lines.append(f"- **Limits** {error.timeout}")
-    lines.append(
-        "- **Suggested** retry the run; if it repeats, set `FACE_UPLOAD_PROVIDER` to another "
-        f"provider ({', '.join(retrieval.PROVIDERS)}) in `.env` and restart."
+        detail.append(f"Limits: {error.timeout}")
+    detail.append(
+        f"Retry the run; if it repeats, set FACE_UPLOAD_PROVIDER to another provider "
+        f"({', '.join(retrieval.PROVIDERS)}) in .env and restart."
     )
-    st.markdown("\n".join(lines))
-    st.caption(
-        "Only the external discovery step is affected. Local face verification and "
-        "on-chain verification of existing evidence still work."
+    detail.append(
+        "Only web discovery is affected - local face matching and on-chain "
+        "verification of existing evidence still work."
     )
+    return {"title": "Web discovery unavailable", "detail": detail}
 
 
-def _read_document(path: str) -> Optional[dict]:
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+def _domain(url: Any) -> str:
+    return urlsplit(str(url)).netloc or str(url)
+
+
+def _evidence_files() -> List[str]:
+    """Evidence file names on disk, oldest first."""
+    if not os.path.isdir(pipeline.EVIDENCE_DIR):
+        return []
+    return sorted(name for name in os.listdir(pipeline.EVIDENCE_DIR) if name.endswith(".json"))
+
+
+def _evidence_path(name: str) -> Optional[str]:
+    """Resolve a client-supplied name inside the evidence directory, or None.
+
+    The name arrives from the browser, so it is matched against the real
+    listing rather than joined onto the directory.
+    """
+    if name not in _evidence_files():
         return None
+    return os.path.join(pipeline.EVIDENCE_DIR, name)
 
 
-def _sidebar() -> None:
-    st.subheader("Environment")
-    for label, name in (
-        ("SerpApi key", "SERPAPI_API_KEY"),
-        ("Wallet key", "BLOCKCHAIN_PRIVATE_KEY"),
-    ):
-        # presence only - a secret must never be rendered
-        st.write(f"{'set' if os.environ.get(name) else 'missing'} - {label}")
-    st.write(f"{retrieval.selected_provider()} - probe upload host")
-    st.caption("Missing keys? Copy .env.example to .env and restart.")
-
-    st.divider()
-    st.subheader("Chain")
-    st.write(f"{registry.NETWORK_NAME} ({registry.CHAIN_ID})")
-    st.caption(os.environ.get("BLOCKCHAIN_RPC_URL") or registry.DEFAULT_RPC_URL)
+def _evidence_index() -> List[Dict[str, Any]]:
+    """Every evidence file on disk, newest first. Unreadable files are skipped."""
+    items: List[Dict[str, Any]] = []
+    for name in reversed(_evidence_files()):
+        path = os.path.join(pipeline.EVIDENCE_DIR, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                document = json.load(handle)
+            items.append({**_evidence_json(document, name[: -len(".json")]), "file": name})
+        except (OSError, ValueError, KeyError, TypeError):
+            LOG.warning("skipping unreadable evidence file %s", name)
+    return items
 
 
-def _candidate_image(result: face_verifier.CandidateResult) -> None:
-    """Show what was actually checked - the downloaded bytes, else the remote URL."""
-    source = result.image_bytes or result.candidate.image_url
-    if source:
-        st.image(source, width="stretch")
+def _candidate_json(index: int, result: face_verifier.CandidateResult) -> Dict[str, Any]:
+    label, tone = STATUS_LABELS[result.status]
+    explanation = explain_result(result)
+    return {
+        "number": index + 1,
+        "rank": result.candidate.position,
+        "is_social": result.candidate.is_social,
+        "label": label,
+        "tone": tone,
+        "source": result.candidate.source or _domain(result.candidate.page_url),
+        "page_url": result.candidate.page_url,
+        # the downloaded bytes are what was actually checked; else the remote URL
+        "image": f"/candidate/{index}.jpg" if result.image_bytes else result.candidate.image_url,
+        "distance": result.distance,
+        "threshold": result.threshold,
+        "reason": result.reason,
+        "status": result.status,
+        "margin": explanation.margin,
+        "margin_display": explanation.margin_display,
+        "decision_rule": explanation.decision_rule,
+        "comparison": explanation.comparison,
+        "reasons": explanation.reasons,
+        "detailed_reasons": explanation.detailed_reasons,
+        "trace": explanation.trace,
+        "distance_percent": distance_scale_percent(result.distance),
+        "threshold_percent": distance_scale_percent(result.threshold) if result.threshold else 68.0,
+    }
 
 
-def _candidate_card(number: int, result: face_verifier.CandidateResult) -> None:
-    label, color = STATUS_STYLES[result.status]
-    with st.container(border=True):
-        heading, badge = st.columns([2, 1], vertical_alignment="center")
-        heading.markdown(f"**Candidate #{number}**")
-        with badge:
-            st.badge(label, color=color)
-
-        st.caption(result.candidate.source or result.candidate.page_url)
-        _candidate_image(result)
-
-        if result.distance is None:
-            # never compared - inventing a distance here would misstate the evidence
-            st.markdown(f"Reason: {result.reason}")
-        else:
-            st.markdown(
-                f"Face distance: `{result.distance:.4f}`\n\n"
-                f"Threshold: `{result.threshold:.4f}`\n\n"
-                f"{result.reason}"
-            )
-        st.link_button("Open source", result.candidate.page_url, width="stretch")
-
-
-def _best_match(result: face_verifier.CandidateResult) -> None:
-    st.subheader("5 · Best verified match")
-    left, right = st.columns([1, 2])
-    with left:
-        _candidate_image(result)
-    with right:
-        st.badge("✓ VERIFIED MATCH", color="green")
-        st.markdown(f"**Source**  \n{result.candidate.source or 'unknown'}")
-        distance, threshold = st.columns(2)
-        distance.metric("Distance", f"{result.distance:.4f}", border=True)
-        threshold.metric("Threshold", f"{result.threshold:.4f}", border=True)
-        st.caption(
-            "Cosine distance below the model threshold. "
-            "The distance is not an identity probability."
-        )
-        st.link_button("Open source", result.candidate.page_url, type="primary")
-
-
-def _investigation(investigation: face_verifier.Investigation) -> None:
-    """Render every candidate outcome the matching layer produced."""
-    st.subheader("4 · Candidate investigation")
-    st.info(HOW_IT_WORKS)
-
-    verified = investigation.verified
-    discovered, checked, matched = st.columns(3)
-    discovered.metric("Candidates discovered", investigation.discovered, border=True)
-    checked.metric("Candidates investigated", investigation.checked, border=True)
-    matched.metric("Verified matches", len(verified), border=True)
-
-    if verified:
-        _best_match(min(verified, key=lambda result: result.distance))
-
-    st.markdown("**Every candidate investigated**")
-    for row_start in range(0, investigation.checked, CARDS_PER_ROW):
-        row = investigation.results[row_start : row_start + CARDS_PER_ROW]
-        for offset, (column, result) in enumerate(zip(st.columns(CARDS_PER_ROW), row)):
-            with column:
-                _candidate_card(row_start + offset + 1, result)
-
-
-def _domain(url: str) -> str:
-    return urlsplit(url).netloc or url
-
-
-def _evidence_package(document: dict, evidence_id: str, heading: str = "Evidence package") -> None:
-    """Show exactly what was fingerprinted - every value comes from the file."""
+def _evidence_json(document: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """Every value here comes from the evidence file - nothing is inferred."""
     evidence = document["evidence"]
     post, match = evidence.get("post", {}), evidence.get("match", {})
+    artifact = document.get("artifacts", {}).get("match_image")
+    return {
+        "id": name,
+        "source": post.get("source") or "unknown",
+        "domain": _domain(post.get("page_url", "")),
+        "page_url": post.get("page_url", ""),
+        "verified": bool(match.get("verified")),
+        "distance": match.get("distance"),
+        "threshold": match.get("threshold"),
+        "model": match.get("model", "unknown"),
+        "discovered_at": evidence.get("discovered_at", "unknown"),
+        "fingerprint": document["fingerprint"],
+        "match_image": f"/evidence/{artifact}" if artifact else None,
+        "title": post.get("title", ""),
+        "is_social": bool(post.get("is_social")),
+        # recomputed locally, so the archive can flag a modified file without a chain call
+        "intact": hashing.fingerprint(evidence) == document["fingerprint"],
+    }
 
-    st.subheader(heading)
-    with st.container(border=True):
-        left, right = st.columns(2)
-        left.markdown(
-            f"**Evidence ID**  \n`{evidence_id}`\n\n"
-            f"**Source**  \n{post.get('source') or 'unknown'} - "
-            f"`{_domain(str(post.get('page_url', '')))}`\n\n"
-            f"**Source URL**  \n{post.get('page_url', 'unknown')}"
+
+def _anchor_json(anchor: Dict[str, Any], fingerprint: str) -> Dict[str, Any]:
+    tx_hash = anchor.get("tx_hash")
+    explorer = (
+        f"{EXPLORER_TX_URL}{tx_hash}"
+        if tx_hash and anchor.get("chain_id") == registry.CHAIN_ID
+        else None
+    )
+    return {
+        "network": anchor.get("network", "unknown"),
+        "chain_id": anchor.get("chain_id", "unknown"),
+        "block_number": anchor.get("block_number", "unknown"),
+        "gas_used": anchor.get("gas_used", "unknown"),
+        "tx_hash": tx_hash or "none",
+        "fingerprint": fingerprint,
+        "explorer": explorer,
+    }
+
+
+def _timeline(job: "Job") -> List[Dict[str, Any]]:
+    """Investigation stages for the progress timeline.
+
+    Derived from what the pipeline has already printed, so the UI shows the
+    same milestones as the CLI without ever exposing raw stdout. A stage
+    carries a duration only where one was actually measured - the two stages
+    that share a single printed line report no time of their own.
+    """
+    log, investigation = job.getvalue(), job.investigation
+    finished = job.state != "running"
+    scan, found = job.marks.get("Face detected"), job.marks.get("Candidates found")
+    verified, fingerprint = job.marks.get("Verified match"), job.marks.get("Fingerprint ")
+    anchored = job.marks.get("Anchored ")
+
+    def took(end: Optional[float], start: Optional[float]) -> Optional[float]:
+        return None if end is None or start is None else round(end - start, 1)
+
+    # the unique count is shown only when deduplication actually merged
+    # something, so the line never claims work that did not happen
+    discovered = f"{investigation.discovered} candidates discovered"
+    if 0 < investigation.unique < investigation.discovered:
+        discovered += f" ({investigation.unique} unique)"
+
+    stages: List[Tuple[str, bool, Optional[float]]] = [
+        ("Face detected", "Face detected" in log, took(scan, 0.0)),
+        (f"{adapter.DEFAULT_MODEL} embedding generated", "Embedding generated" in log, None),
+        ("Reverse image search completed", "Candidates found" in log, took(found, scan)),
+        (discovered, investigation.discovered > 0, None),
+        (
+            f"{investigation.checked} candidates verified",
+            finished and investigation.checked > 0,
+            took(verified, found),
+        ),
+        ("Evidence fingerprint created", "Fingerprint " in log, took(fingerprint, verified)),
+        (f"Anchored on {registry.NETWORK_NAME}", "Anchored " in log, took(anchored, fingerprint)),
+    ]
+
+    steps: List[Dict[str, Any]] = []
+    running = job.state == "running"
+    for label, done, seconds in stages:
+        state = "done" if done else "active" if running else "pending"
+        running = running and done  # only the first unfinished stage animates
+        steps.append({"label": label, "state": state, "seconds": seconds if done else None})
+    return steps
+
+
+@app.get("/")
+def index() -> str:
+    return render_template(
+        "run.html",
+        page="run",
+        default_candidates=face_verifier.DEMO_CANDIDATES,
+        candidate_choices=CANDIDATE_CHOICES,
+    )
+
+
+@app.get("/verify")
+def verify_page() -> str:
+    items = _evidence_index()
+    selected = request.args.get("file", "")
+    if not any(item["file"] == selected for item in items):
+        selected = items[0]["file"] if items else ""
+    return render_template("verify.html", page="verify", items=items, selected=selected)
+
+
+@app.get("/evidence")
+def evidence_index() -> str:
+    return render_template("evidence.html", page="evidence", items=_evidence_index())
+
+
+@app.post("/api/run")
+def api_run() -> Any:
+    global _JOB
+    upload = request.files.get("probe")
+    if upload is None or not upload.filename:
+        return jsonify(error="Choose a probe image first."), 400
+    if not upload.filename.lower().endswith(ALLOWED_SUFFIXES):
+        return jsonify(error=f"Unsupported file type - use {', '.join(ALLOWED_SUFFIXES)}."), 400
+
+    try:
+        max_candidates = max(5, min(50, int(request.form.get("max_candidates", 10))))
+    except ValueError:
+        return jsonify(error="Candidate count must be a number."), 400
+
+    with _JOB_LOCK:
+        if _JOB is not None and _JOB.state == "running":
+            return jsonify(error="A run is already in progress."), 409
+        suffix = os.path.splitext(upload.filename)[1].lower()
+        handle, probe_path = tempfile.mkstemp(prefix="faceproof-probe-", suffix=suffix)
+        os.close(handle)
+        upload.save(probe_path)
+        _JOB = Job(probe_path, max_candidates)
+        _JOB.start()
+    return jsonify(ok=True)
+
+
+@app.get("/api/run")
+def api_run_status() -> Any:
+    """Progress for the run page: counts as JSON, everything visible as Jinja.
+
+    Rendering the cards server-side keeps one copy of the markup and lets
+    autoescaping handle the candidate titles and URLs, which come off the
+    open web.
+    """
+    job = _JOB
+    if job is None:
+        return jsonify(state="idle")
+
+    candidates = [
+        _candidate_json(index, result) for index, result in enumerate(job.investigation.results)
+    ]
+    try:
+        since = max(0, int(request.args.get("since", 0)))
+    except ValueError:
+        since = 0
+
+    anchor = (
+        _anchor_json(job.document["anchor"], job.document["fingerprint"]) if job.document else None
+    )
+    payload: Dict[str, Any] = {
+        "state": job.state,
+        "discovered": job.investigation.discovered,
+        "unique": job.investigation.unique,
+        "checked": job.investigation.checked,
+        "verified": sum(1 for candidate in candidates if candidate["tone"] == "ok"),
+        "count": len(candidates),
+        "elapsed": round(job.elapsed, 1),
+        "timeline_html": render_template("fragments/timeline.html", steps=_timeline(job)),
+        # only the candidates the browser has not drawn yet, so thumbnails never reload
+        "candidates_html": render_template(
+            "fragments/candidates.html", candidates=candidates[since:]
+        ),
+        "error_html": (
+            render_template("fragments/error.html", error=job.error) if job.error else ""
+        ),
+        "result_html": "",
+        "best_html": "",
+    }
+
+    verified = job.investigation.verified
+    evaluated = [r for r in job.investigation.results if r.distance is not None]
+    if verified:
+        # a verified result always carries a distance; the fallback only satisfies the type
+        best = min(verified, key=lambda result: float(result.distance or 0.0))
+        payload["best_html"] = render_template(
+            "fragments/best.html",
+            candidate=_candidate_json(job.investigation.results.index(best), best),
+            model=adapter.DEFAULT_MODEL,
+            anchor=anchor,
         )
-        right.markdown(
-            f"**Match status**  \n{'✓ VERIFIED MATCH' if match.get('verified') else '✗ NO MATCH'}"
-            f"\n\n**Cosine distance / model threshold**  \n"
-            f"`{match.get('distance', 'unknown')}` / `{match.get('threshold', 'unknown')}` "
-            f"({match.get('model', 'unknown')})\n\n"
-            f"**Timestamp**  \n`{evidence.get('discovered_at', 'unknown')}`"
+    elif evaluated and job.state in ("done", "failed"):
+        best = min(evaluated, key=lambda result: float(result.distance or 999.0))
+        payload["best_html"] = render_template(
+            "fragments/best.html",
+            candidate=_candidate_json(job.investigation.results.index(best), best),
+            model=adapter.DEFAULT_MODEL,
+            anchor=anchor,
         )
-        st.markdown("**EVIDENCE FINGERPRINT** (SHA-256)")
-        st.code(document["fingerprint"], language="text")
-        st.caption(FINGERPRINT_NOTE)
-        st.caption(SCOPE_NOTE)
-
-
-def _anchor_panel(anchor: dict, fingerprint: str, heading: str = "Blockchain anchor") -> None:
-    """Blockchain facts exactly as the pipeline received them from the chain."""
-    st.subheader(heading)
-    with st.container(border=True):
-        st.badge(f"✓ ANCHORED on {anchor.get('network', 'unknown network')}", color="green")
-        left, right = st.columns(2)
-        left.markdown(
-            f"**Network**  \n{anchor.get('network', 'unknown')}\n\n"
-            f"**Chain ID**  \n`{anchor.get('chain_id', 'unknown')}`"
+    if job.document:
+        name = str(job.document["artifacts"]["match_image"])[: -len(".match.jpg")]
+        payload["result_html"] = render_template(
+            "fragments/result.html",
+            evidence=_evidence_json(job.document, name),
+            anchor=anchor,
+            # no audit has run yet: the run that wrote this evidence cannot
+            # audit itself, so the chain's last step stays open
+            events=provenance.timeline(job.document),
+            summary=provenance.summary(job.document),
+            verify_url=url_for("verify_page", file=f"{name}.json"),
         )
-        right.markdown(
-            f"**Block number**  \n`{anchor.get('block_number', 'unknown')}`\n\n"
-            f"**Gas used**  \n`{anchor.get('gas_used', 'unknown')}`"
+    return jsonify(payload)
+
+
+@app.get("/candidate/<int:index>.jpg")
+def candidate_image(index: int) -> Any:
+    job = _JOB
+    if job is None or index >= len(job.investigation.results):
+        return "", 404
+    image_bytes = job.investigation.results[index].image_bytes
+    if image_bytes is None:
+        return "", 404
+    return app.response_class(image_bytes, mimetype="image/jpeg")
+
+
+@app.get("/evidence/<name>")
+def evidence_artifact(name: str) -> Any:
+    return send_from_directory(os.path.abspath(pipeline.EVIDENCE_DIR), name)
+
+
+@app.get("/replay/<investigation_id>")
+@app.get("/evidence/<investigation_id>/replay")
+def replay_view(investigation_id: str) -> Any:
+    """Render a completed historical investigation from persisted evidence."""
+    try:
+        replay = load_replay(investigation_id, evidence_dir=pipeline.EVIDENCE_DIR)
+    except InvestigationSecurityError:
+        return (
+            render_template(
+                "error.html",
+                page="evidence",
+                error={
+                    "title": "Invalid Investigation Identifier",
+                    "detail": [
+                        f"The identifier '{investigation_id}' contains invalid characters or path traversal sequences.",
+                        "FaceProof enforces strict filesystem isolation on evidence identifiers.",
+                    ],
+                },
+            ),
+            400,
         )
-        st.markdown("**Transaction hash**")
-        st.code(anchor.get("tx_hash", "none"), language="text")
-        st.markdown("**Evidence fingerprint anchored**")
-        st.code(fingerprint, language="text")
-        if anchor.get("tx_hash") and anchor.get("chain_id") == registry.CHAIN_ID:
-            st.link_button(
-                "View on BaseScan", f"{EXPLORER_TX_URL}{anchor['tx_hash']}", type="primary"
-            )
-
-
-def _flow() -> None:
-    for column, (step, detail) in zip(st.columns(len(FLOW_STEPS)), FLOW_STEPS):
-        with column.container(border=True):
-            st.markdown(f"**{step}**")
-            st.caption(detail)
-
-
-def _chain(rungs: Tuple[str, ...], ok: bool) -> None:
-    """The demo sequence as a vertical chain, ending in the verdict it produced."""
-    verdict = "✓ VERIFIED" if ok else "✗ TAMPERED"
-    with st.container(border=True):
-        st.markdown("\n\n↓\n\n".join(f"**{rung}**" for rung in (*rungs, verdict)))
-
-
-def _comparison(local: str, local_label: str, onchain: str) -> None:
-    st.markdown(f"**{local_label}**")
-    st.code(local, language="text")
-    st.markdown("**ON-CHAIN FINGERPRINT**")
-    st.code(onchain, language="text")
-    if local == onchain:
-        st.success("✓ MATCH - VERIFIED - evidence fingerprint matches the blockchain record")
-    else:
-        st.error(
-            "✗ MISMATCH - TAMPERED - evidence fingerprint does not match the blockchain record"
+    except InvestigationNotFoundError:
+        return (
+            render_template(
+                "error.html",
+                page="evidence",
+                error={
+                    "title": "Investigation Not Found",
+                    "detail": [
+                        f"No recorded evidence exists for investigation '{investigation_id}'.",
+                        "Cached replay reconstructs existing evidence and will never trigger an unintended live search.",
+                        "To investigate a new face, run a fresh investigation from the home page.",
+                    ],
+                },
+            ),
+            404,
+        )
+    except Exception as err:
+        LOG.exception("Replay failed for %s", investigation_id)
+        return (
+            render_template(
+                "error.html",
+                page="evidence",
+                error={"title": "Replay Failure", "detail": [str(err)]},
+            ),
+            500,
         )
 
+    anchor_json = _anchor_json(replay.anchor, replay.fingerprint)
+    return render_template(
+        "replay.html",
+        page="evidence",
+        replay=replay,
+        anchor_json=anchor_json,
+    )
 
-def _verification(report: pipeline.Audit, tampered: bool) -> None:
-    st.subheader("Verification")
-    _flow()
 
-    if tampered:
+@app.get("/api/evidence/<investigation_id>/replay")
+@app.get("/api/replay/<investigation_id>")
+def api_replay(investigation_id: str) -> Any:
+    """JSON API endpoint returning the replay read model."""
+    try:
+        replay = load_replay(investigation_id, evidence_dir=pipeline.EVIDENCE_DIR)
+        return jsonify(replay.as_dict())
+    except InvestigationSecurityError:
+        return (
+            jsonify(
+                error="Invalid investigation identifier",
+                detail="Path traversal or invalid characters rejected.",
+            ),
+            400,
+        )
+    except InvestigationNotFoundError:
+        return (
+            jsonify(
+                error="Investigation not found",
+                detail=f"No evidence for '{investigation_id}'",
+            ),
+            404,
+        )
+    except Exception as err:
+        LOG.exception("API replay failed for %s", investigation_id)
+        return jsonify(error="Replay failed", detail=str(err)), 500
+
+
+@app.post("/api/verify")
+def api_verify() -> Any:
+    payload = request.get_json(silent=True) or {}
+    path = _evidence_path(str(payload.get("file", "")))
+    if path is None:
+        return jsonify(error="Unknown evidence file."), 404
+
+    try:
+        report = pipeline.audit(path)
+    except (RuntimeError, ValueError, FileNotFoundError, OSError) as error:
+        LOG.exception("audit failed")
+        described = _describe(error)
+        return jsonify(error=described["title"], detail=described["detail"]), 400
+
+    name = os.path.basename(path)[: -len(".json")]
+    result: Dict[str, Any] = {
+        "evidence": _evidence_json(report.document, name),
+        "anchor": _anchor_json(report.document["anchor"], report.stored_fingerprint),
+        "onchain": report.onchain_fingerprint,
+        "checks": [
+            {"label": "Local evidence integrity", "ok": report.local_ok},
+            {"label": "Search response integrity", "ok": report.search_ok},
+            {"label": "Matched image integrity", "ok": report.image_ok},
+        ],
+        # the chain as the audit found it, so the last step reports a real verdict
+        "events": provenance.timeline(report.document, report),
+        "summary": provenance.summary(report.document, report),
+    }
+
+    if payload.get("tamper"):
         section, key = pipeline.TAMPER_FIELD
         modified, digest = pipeline.tamper(report.document["evidence"])
-        st.warning(
-            f"Simulation on an in-memory copy - the evidence file on disk is untouched. "
-            f"Edited field `{section}.{key}`: {modified[section][key]}"
+        simulated = _SimulatedAudit(digest, report.onchain_fingerprint, report.tx_hash)
+        result.update(
+            events=provenance.timeline(report.document, simulated),
+            summary=provenance.summary(report.document, simulated),
+            tampered=True,
+            local=digest,
+            local_label="TAMPERED FINGERPRINT",
+            original=report.local_fingerprint,
+            edited_field=f"{section}.{key}",
+            edited_value=modified[section][key],
+            ok=digest == report.onchain_fingerprint,
+            checks=[],  # a simulated edit says nothing about the file's own artifacts
+            restore=True,  # offer the way back; the file on disk never changed
         )
-        _chain(TAMPERED_CHAIN, digest == report.onchain_fingerprint)
-        st.markdown("**ORIGINAL FINGERPRINT**")
-        st.code(report.local_fingerprint, language="text")
-        _comparison(digest, "TAMPERED FINGERPRINT", report.onchain_fingerprint)
-        st.caption("Press **Restore / verify original** to re-check the untouched file.")
-        return
+        return jsonify(_rendered(result))
 
-    _chain(INTACT_CHAIN, report.onchain_ok)
-    _comparison(report.local_fingerprint, "LOCAL FINGERPRINT", report.onchain_fingerprint)
-    supporting = (
-        ("Search response integrity", report.search_ok),
-        ("Matched image integrity", report.image_ok),
+    result.update(
+        tampered=False,
+        local=report.local_fingerprint,
+        local_label="LOCAL FINGERPRINT",
+        ok=report.onchain_ok,
     )
-    for label, ok in supporting:
-        if ok is not None:  # None = this file carries nothing to check that against
-            st.caption(f"{'✓' if ok else '✗'} {label}")
+    return jsonify(_rendered(result))
 
 
-def _audit(path: str, tampered: bool) -> None:
-    """Re-read the file and the chain, then stash the report for rendering."""
-    report, error = _stream(pipeline.audit, path)
-    if error:
-        _show_error(error)
-    st.session_state["report"] = report
-    st.session_state["tampered"] = tampered
+def _rendered(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach the server-rendered verdict card to an audit result."""
+    return {**result, "html": render_template("fragments/verify_result.html", report=result)}
 
 
-def _run_tab() -> None:
-    st.subheader("1 · Input face")
-    upload = st.file_uploader("Probe face image", type=PROBE_TYPES)
-    max_candidates = st.slider("Candidates to verify", 5, 50, face_verifier.DEMO_CANDIDATES)
-    st.caption(
-        "Every candidate is downloaded and face-checked, so more candidates take longer. "
-        "The first run also downloads ~130 MB of model weights."
-    )
-
-    if not st.button("Run pipeline", type="primary", disabled=upload is None):
-        return
-
-    probe_path = os.path.join(tempfile.gettempdir(), f"faceproof-probe-{upload.name}")
-    with open(probe_path, "wb") as handle:
-        handle.write(upload.getbuffer())
-
-    investigation = face_verifier.Investigation()
-    st.subheader("2 · Face analysis  →  3 · Web discovery")
-    left, right = st.columns([1, 3])
-    with left:
-        st.image(upload, caption="probe")
-    with right:
-        document, error = _stream(
-            pipeline.run, probe_path, max_candidates=max_candidates, investigation=investigation
-        )
-
-    # filled in place, so the candidate work stays visible even when the run failed
-    if investigation.results:
-        st.divider()
-        _investigation(investigation)
-        st.divider()
-
-    if error:
-        _show_error(error)
-        st.caption("No evidence file was written and nothing was anchored.")
-        return
-
-    _evidence_package(
-        document,
-        str(document["artifacts"]["match_image"])[: -len(".match.jpg")],
-        heading="6 · Evidence package",
-    )
-    _anchor_panel(document["anchor"], document["fingerprint"], heading="7 · Blockchain anchor")
-    st.success("✓ VERIFIED - match verified, evidence fingerprinted and anchored on-chain")
-    st.info(WHAT_THIS_PROVES)
-    with st.expander("Raw evidence document"):
-        st.json(document["evidence"])
+@app.errorhandler(413)
+def _too_large(_: Exception) -> Any:
+    return jsonify(error=f"Image is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."), 413
 
 
-def _verify_tab() -> None:
-    paths = sorted(glob.glob(os.path.join(pipeline.EVIDENCE_DIR, "*.json")))
-    if not paths:
-        st.info("No evidence files yet - run the pipeline first.")
-        return
-
-    st.subheader("1 · Select evidence")
-    path = st.selectbox("Evidence file", paths, index=len(paths) - 1)
-    st.caption(
-        "An independent audit: it reads the evidence file and the chain, not the last run. "
-        "Hand-edit any value inside the file's `evidence` block, then verify again."
-    )
-    if st.session_state.get("audit_path") != path:
-        # a report about another file says nothing about this one
-        st.session_state.pop("report", None)
-        st.session_state["audit_path"] = path
-
-    document = _read_document(path)
-    match_image = (document or {}).get("artifacts", {}).get("match_image")
-    if match_image:
-        image_path = os.path.join(os.path.dirname(path), match_image)
-        if os.path.isfile(image_path):
-            st.image(image_path, caption="matched image", width=220)
-
-    check, simulate, restore = st.columns(3)
-    if check.button("Verify", type="primary", width="stretch"):
-        _audit(path, tampered=False)
-    if simulate.button("Simulate tampering", width="stretch"):
-        _audit(path, tampered=True)
-    if restore.button("Restore / verify original", width="stretch"):
-        _audit(path, tampered=False)
-
-    report = st.session_state.get("report")
-    if report is None:
-        return
-
-    _evidence_package(report.document, os.path.basename(path)[: -len(".json")])
-    _anchor_panel(report.document["anchor"], report.stored_fingerprint)
-    _verification(report, bool(st.session_state.get("tampered")))
-    st.info(WHAT_THIS_PROVES)
-
-
-st.title("FaceProof")
-st.caption(TAGLINE)
-st.markdown(TRUST_MODEL)
-
-with st.sidebar:
-    _sidebar()
-
-run_tab, verify_tab = st.tabs(["Run", "Verify"])
-with run_tab:
-    _run_tab()
-with verify_tab:
-    _verify_tab()
+if __name__ == "__main__":
+    app.run(port=8000)

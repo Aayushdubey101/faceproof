@@ -1,0 +1,8 @@
+<section class="panel panel-bad">
+  <h2 class="panel-title"><span class="panel-glyph">&#9888;</span>{{ error.title or 'Something went wrong' }}</h2>
+  {% for line in error.detail or [] %}
+  <p class="panel-note">{{ line }}</p>
+  {% else %}
+  <p class="panel-note">No further detail.</p>
+  {% endfor %}
+</section>

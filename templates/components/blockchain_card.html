@@ -1,0 +1,24 @@
+{# The on-chain anchor for a fingerprint. #}
+{% macro blockchain_card(anchor) -%}
+{% if anchor %}
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#9707;</span>Blockchain Evidence Anchor</h2>
+  <div class="chain-grid">
+    <div class="chain-cell"><span class="chain-key">Network</span><span class="chain-value">{{ anchor.network }}</span></div>
+    <div class="chain-cell"><span class="chain-key">Chain ID</span><span class="chain-value mono">{{ anchor.chain_id }}</span></div>
+    <div class="chain-cell"><span class="chain-key">Block</span><span class="chain-value mono">{{ anchor.block_number }}</span></div>
+    <div class="chain-cell"><span class="chain-key">Gas</span><span class="chain-value mono">{{ anchor.gas_used }}</span></div>
+  </div>
+  <div class="tx-row">
+    <span class="chain-key">Transaction</span>
+    <code class="tx mono">{{ anchor.tx_hash }}</code>
+    <div class="tx-actions">
+      <button type="button" class="btn btn-ghost btn-sm" data-copy="{{ anchor.tx_hash }}">Copy</button>
+      {% if anchor.explorer %}
+      <a class="btn btn-ghost btn-sm" href="{{ anchor.explorer }}" target="_blank" rel="noreferrer noopener">View on BaseScan</a>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endif %}
+{%- endmacro %}

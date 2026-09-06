@@ -1,0 +1,49 @@
+{# Local fingerprint against the anchored digest.
+
+   `onchain` is none until an audit has actually read the chain. That state is
+   drawn as "not yet read", never as a match: a comparison this page did not
+   make must not look like one it did.
+#}
+{% macro integrity(local, onchain, ok, verify_url=none) -%}
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#9639;</span>Evidence Integrity</h2>
+  <div class="integrity">
+    <div class="integrity-side">
+      <span class="integrity-key">Local SHA-256</span>
+      <code class="integrity-hash mono break">{{ local }}</code>
+    </div>
+    <div class="integrity-op {{ 'is-ok' if onchain and ok else 'is-bad' if onchain else 'is-idle' }}">
+      {% if onchain %}{{ '=' if ok else '≠' }}{% else %}?{% endif %}
+    </div>
+    <div class="integrity-side">
+      <span class="integrity-key">On-chain digest</span>
+      {% if onchain %}
+      <code class="integrity-hash mono break">{{ onchain }}</code>
+      {% else %}
+      <span class="integrity-idle">Read from the chain during an independent audit</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if onchain %}
+  <p class="integrity-verdict {{ 'is-ok' if ok else 'is-bad' }}">
+    <span class="integrity-glyph">{{ '✓' if ok else '⚠' }}</span>
+    {{ 'INTEGRITY VERIFIED' if ok else 'TAMPER DETECTED' }}
+  </p>
+  <p class="panel-note">
+    {%- if ok -%}
+      The evidence is byte-for-byte what was anchored. That proves the record has not
+      changed since anchoring; it is not by itself proof of anyone's real-world identity.
+    {%- else -%}
+      The recomputed fingerprint differs from the digest anchored on chain, so the
+      evidence has changed since it was anchored.
+    {%- endif -%}
+  </p>
+  {% else %}
+  <p class="integrity-verdict is-idle"><span class="integrity-glyph">◌</span>AWAITING INDEPENDENT AUDIT</p>
+  <p class="panel-note">The digest was anchored in the transaction below. FaceProof claims
+    integrity only once it has recomputed the fingerprint and read the anchored one back off
+    the chain{% if verify_url %} — <a href="{{ verify_url }}">verify this record</a>{% endif %}.</p>
+  {% endif %}
+</section>
+{%- endmacro %}

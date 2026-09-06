@@ -1,0 +1,62 @@
+{% from "components/blockchain_card.html" import blockchain_card %}
+{% from "components/evidence_details.html" import evidence_details %}
+{% from "components/integrity.html" import integrity %}
+{% from "components/provenance.html" import provenance %}
+{% set ok = report.ok and not report.tampered %}
+
+<section class="verdict {{ 'verdict-ok' if ok else 'verdict-bad' }}">
+  <span class="verdict-glyph">{{ '✓' if ok else '⚠' }}</span>
+  <div>
+    <h2 class="verdict-title">{{ 'VERIFIED' if ok else 'TAMPERED' }}</h2>
+    <p class="verdict-note">
+      {%- if ok -%}
+        The evidence fingerprint matches the digest anchored on {{ report.anchor.network }}, and the
+        associated integrity checks passed. That establishes that the record has not changed since
+        it was anchored - not the real-world identity of the person in it.
+      {%- elif report.tampered -%}
+        One edited field changed the SHA-256 fingerprint, so the recomputed value no longer matches
+        the digest anchored on {{ report.anchor.network }}. The file on disk was not modified.
+      {%- else -%}
+        The recomputed evidence fingerprint does not match the digest anchored on
+        {{ report.anchor.network }}.
+      {%- endif -%}
+    </p>
+    {% if report.restore %}
+    <div class="verdict-actions">
+      <button type="button" class="btn btn-outline btn-sm" data-tamper="0">Restore Original</button>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{% if report.tampered %}
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#9888;</span>Simulated Edit</h2>
+  <dl class="kv kv-stack">
+    <div class="kv-wide"><dt>Edited field</dt><dd class="mono break">{{ report.edited_field }} = {{ report.edited_value }}</dd></div>
+    <div class="kv-wide"><dt>Original fingerprint</dt><dd class="mono break">{{ report.original }}</dd></div>
+  </dl>
+  <p class="panel-note">The edit is applied to an in-memory copy only. The evidence file, its
+    artifacts and the anchoring transaction are untouched.</p>
+</section>
+{% endif %}
+
+{{ integrity(report.local, report.onchain, ok) }}
+
+{% set checks = report.checks | selectattr('ok', 'ne', none) | list %}
+{% if checks %}
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#10003;</span>Artifact Checks</h2>
+  <ul class="checks">
+    {% for check in checks %}
+    <li class="{{ 'ok' if check.ok else 'bad' }}"><span>{{ '✓' if check.ok else '✕' }}</span>{{ check.label }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{{ provenance(report.events) }}
+
+{{ blockchain_card(report.anchor) }}
+
+{{ evidence_details(report.summary) }}

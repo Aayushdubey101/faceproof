@@ -1,0 +1,9 @@
+{# One stage of the investigation. state: done | active | pending.
+   seconds is the measured duration, omitted where nothing was measured. #}
+{% macro timeline_step(label, state='pending', seconds=None) -%}
+<li class="tl-step is-{{ state }}">
+  <span class="tl-dot"></span>
+  <span class="tl-label">{{ label }}</span>
+  {% if seconds is not none %}<span class="tl-time mono">{{ '%.1f' % seconds }}s</span>{% endif %}
+</li>
+{%- endmacro %}

@@ -1,0 +1,6 @@
+{# Outcome chip. tone: ok | bad | warn | neutral #}
+{% macro status_chip(label, tone='neutral') -%}
+<span class="chip chip-{{ tone }}">
+  <span class="chip-dot">{{ '✓' if tone == 'ok' else '✕' if tone == 'bad' else '!' if tone == 'warn' else '•' }}</span>{{ label }}
+</span>
+{%- endmacro %}

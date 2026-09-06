@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}FaceProof — Error{% endblock %}
+
+{% block content %}
+<header class="hero">
+  <h1 class="hero-title">{{ error.title or 'Investigation Error' }}</h1>
+  <p class="hero-sub">The requested operation could not be completed.</p>
+</header>
+
+<section class="panel panel-bad">
+  <h2 class="panel-title"><span class="panel-glyph">&#9888;</span>{{ error.title or 'Error' }}</h2>
+  {% for line in error.detail or [] %}
+  <p class="panel-note">{{ line }}</p>
+  {% else %}
+  <p class="panel-note">No further detail.</p>
+  {% endfor %}
+
+  <div class="action-buttons-row" style="margin-top: 1.5rem;">
+    <a class="btn btn-outline" href="{{ url_for('evidence_index') }}">Back to Evidence Archive</a>
+    <a class="btn btn-ghost" href="{{ url_for('index') }}">Run Fresh Investigation</a>
+  </div>
+</section>
+{% endblock %}

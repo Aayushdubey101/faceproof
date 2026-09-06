@@ -1,0 +1,2 @@
+{% from "components/timeline_step.html" import timeline_step %}
+{% for step in steps %}{{ timeline_step(step.label, step.state, step.seconds) }}{% endfor %}

@@ -1,0 +1,8 @@
+{# One number from the investigation summary. #}
+{% macro metric_card(value, label, glyph, id=none) -%}
+<article class="metric-card">
+  <span class="metric-glyph">{{ glyph }}</span>
+  <span class="metric-value"{% if id %} id="{{ id }}"{% endif %}>{{ value }}</span>
+  <span class="metric-label">{{ label }}</span>
+</article>
+{%- endmacro %}

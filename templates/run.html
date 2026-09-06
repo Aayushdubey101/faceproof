@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% from "components/metric_card.html" import metric_card %}
+
+{% block content %}
+<header class="hero">
+  <h1 class="hero-title">Run Investigation</h1>
+  <p class="hero-sub">Search the web for a face, independently verify every result,
+    then create a tamper-proof blockchain record.</p>
+</header>
+
+<form id="run-form" class="panel upload-panel">
+  <label class="dropzone" id="dropzone">
+    <input type="file" name="probe" id="probe" accept=".jpg,.jpeg,.png,.webp" required>
+    <img id="probe-preview" class="dropzone-preview" alt="Probe preview" hidden>
+    <div class="dropzone-empty" id="dropzone-empty">
+      <span class="dropzone-glyph">&#8679;</span>
+      <p class="dropzone-headline">Drop a probe image, or click to browse</p>
+      <p class="dropzone-hint">JPG, PNG or WebP &middot; up to 16 MB</p>
+    </div>
+  </label>
+
+  <div class="upload-meta" id="upload-meta" hidden>
+    <span class="file-name mono" id="file-name"></span>
+    <span class="file-size mono" id="file-size"></span>
+    <div class="upload-actions">
+      <button type="button" class="btn btn-ghost btn-sm" id="replace-image">Replace image</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="remove-image">Remove image</button>
+    </div>
+  </div>
+
+  <div class="run-bar">
+    <label class="field">
+      <span class="field-label">Candidates to verify</span>
+      <select name="max_candidates" id="max-candidates">
+        {% for choice in candidate_choices %}
+        <option value="{{ choice }}" {{ 'selected' if choice == default_candidates }}>{{ choice }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <p class="runtime" id="runtime-line" hidden>Runtime: <span id="runtime" class="mono">0.0s</span></p>
+    <button class="btn btn-primary btn-lg" id="run-button" type="submit">Run Investigation</button>
+  </div>
+</form>
+
+<div id="error"></div>
+
+<section class="panel" id="progress" hidden>
+  <h2 class="panel-title"><span class="panel-glyph">&#9679;</span>Investigation Progress</h2>
+  <ol class="timeline" id="timeline"></ol>
+</section>
+
+<section id="summary" hidden>
+  <h2 class="section-title">Investigation Summary</h2>
+  <div class="metrics">
+    {{ metric_card(0, 'Discovered', '⌕', id='m-discovered') }}
+    {{ metric_card(0, 'Investigated', '▤', id='m-checked') }}
+    {{ metric_card(0, 'Verified', '✓', id='m-verified') }}
+  </div>
+</section>
+
+<div id="best"></div>
+
+<section id="gallery-section" hidden>
+  <h2 class="section-title">Candidate Gallery</h2>
+  <div id="candidates" class="cand-grid"></div>
+</section>
+
+<div id="result"></div>
+{% endblock %}

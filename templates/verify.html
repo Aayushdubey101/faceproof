@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header class="hero">
+  <h1 class="hero-title">Verify Evidence</h1>
+  <p class="hero-sub">Recompute the fingerprint of a stored record and compare it with the
+    digest anchored on-chain. No search is repeated.</p>
+</header>
+
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#8644;</span>Verification Flow</h2>
+  <ol class="flow">
+    <li class="flow-step"><span class="flow-glyph">&#9634;</span><span class="flow-label">Input evidence</span></li>
+    <li class="flow-step"><span class="flow-glyph">&#8635;</span><span class="flow-label">Recompute SHA-256</span></li>
+    <li class="flow-step"><span class="flow-glyph">&#9707;</span><span class="flow-label">Read blockchain</span></li>
+    <li class="flow-step"><span class="flow-glyph">&#9639;</span><span class="flow-label">Compare digests</span></li>
+    <li class="flow-step"><span class="flow-glyph">&#9635;</span><span class="flow-label">Check artifacts</span></li>
+    <li class="flow-step flow-end"><span class="flow-glyph">&#10003;</span><span class="flow-label">Verdict</span></li>
+  </ol>
+  <p class="panel-note">A pass proves the record has not changed since it was anchored. It does
+    not prove the real-world identity of the person in it.</p>
+</section>
+
+<section class="panel">
+  {% if items %}
+  <div class="run-bar">
+    <label class="field grow">
+      <span class="field-label">Evidence record</span>
+      <select id="file">
+        {% for item in items %}
+        <option value="{{ item.file }}" {{ 'selected' if item.file == selected }}>
+          {{ item.source }} &middot; {{ item.discovered_at[:10] }} &middot; {{ item.fingerprint[:12] }}…
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="button" class="btn btn-primary" data-tamper="0">Verify Evidence</button>
+    <button type="button" class="btn btn-outline" data-tamper="1">Simulate Tampering</button>
+  </div>
+  <p class="panel-note">No search is repeated — only the stored file, its artifacts, and the
+    on-chain fingerprint are compared.</p>
+  {% else %}
+  <p class="empty"><span class="empty-glyph">&#9634;</span>No evidence records yet.
+    <a href="{{ url_for('index') }}">Run an investigation</a> to create one.</p>
+  {% endif %}
+</section>
+
+<div id="error"></div>
+<div id="result"></div>
+{% endblock %}

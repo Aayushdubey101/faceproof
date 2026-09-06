@@ -1,0 +1,40 @@
+{# The investigation chain of one evidence document, face scan to audit.
+
+   Every value comes from faceproof.evidence.provenance, which reads the stored
+   document rather than recomputing anything, so a step that failed is drawn as
+   a step that failed. Long values (hashes, transactions) get the mono
+   treatment by their own length, so the macro never has to know what a field
+   means.
+#}
+{% macro provenance(events, title="Investigation Provenance", subtitle=none) -%}
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#9679;</span>{{ title }}</h2>
+  {% if subtitle %}
+  <p class="panel-sub">{{ subtitle }}</p>
+  {% endif %}
+  <ol class="prov">
+    {% for event in events %}
+    <li class="prov-step is-{{ event.status }}">
+      <span class="prov-dot"></span>
+      <div class="prov-body">
+        <div class="prov-head">
+          <h3 class="prov-title">{{ event.title }}</h3>
+          <span class="prov-stage mono">{{ event.stage }}</span>
+        </div>
+        <p class="prov-desc">{{ event.description }}</p>
+        {% if event.metadata %}
+        <dl class="prov-meta">
+          {% for key, value in event.metadata.items() %}
+          <div>
+            <dt>{{ key }}</dt>
+            <dd{% if value is string and value|length > 24 %} class="mono break"{% endif %}>{{ value }}</dd>
+          </div>
+          {% endfor %}
+        </dl>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+</section>
+{%- endmacro %}

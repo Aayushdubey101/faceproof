@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}FaceProof{% endblock %}</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="{{ url_for('index') }}">
+        <span class="brand-mark">&#9672;</span>
+        <span class="brand-text">
+          <strong>FaceProof</strong>
+          <small>Digital Evidence Intelligence</small>
+        </span>
+      </a>
+
+      <nav class="nav">
+        <p class="nav-group">Investigation</p>
+        <a href="{{ url_for('index') }}" class="nav-link {{ 'active' if page == 'run' }}">
+          <span class="nav-glyph">&#8981;</span>Run Investigation
+        </a>
+
+        <p class="nav-group">Evidence</p>
+        <a href="{{ url_for('evidence_index') }}" class="nav-link {{ 'active' if page == 'evidence' }}">
+          <span class="nav-glyph">&#9635;</span>Evidence Archive
+        </a>
+        <a href="{{ url_for('verify_page') }}" class="nav-link {{ 'active' if page == 'verify' }}">
+          <span class="nav-glyph">&#10003;</span>Verify Evidence
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">FaceProof v1.0</div>
+    </aside>
+
+    <div class="content">
+      <main class="main">{% block content %}{% endblock %}</main>
+      <footer class="foot">
+        Face matching decides the similarity. SHA-256 fingerprints the evidence, and the chain
+        anchors that fingerprint so modification is detectable. It does not prove real-world
+        identity.
+      </footer>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  {% block script %}{% endblock %}
+</body>
+</html>

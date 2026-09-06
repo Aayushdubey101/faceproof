@@ -1,0 +1,28 @@
+{% from "components/blockchain_card.html" import blockchain_card %}
+{% from "components/evidence_details.html" import evidence_details %}
+{% from "components/integrity.html" import integrity %}
+{% from "components/provenance.html" import provenance %}
+
+{# Result of a finished run, in the order a reviewer reads it: what was found,
+   how it was found, what it hashes to, where that hash went, and what is still
+   unproven. The audit stage is deliberately still open here - the run that
+   created the evidence cannot audit itself. #}
+
+{{ provenance(events) }}
+
+<section class="panel">
+  <h2 class="panel-title"><span class="panel-glyph">&#9634;</span>Matched Web Evidence</h2>
+  <dl class="kv kv-stack">
+    <div><dt>Evidence ID</dt><dd class="mono">{{ evidence.id }}</dd></div>
+    <div><dt>Source</dt><dd>{% if evidence.page_url %}<a href="{{ evidence.page_url }}" target="_blank" rel="noreferrer noopener">{{ evidence.source }}</a>{% else %}{{ evidence.source }}{% endif %}</dd></div>
+    <div><dt>Domain</dt><dd>{{ evidence.domain }}</dd></div>
+    <div><dt>Model</dt><dd>{{ evidence.model }}</dd></div>
+    <div><dt>Discovered</dt><dd>{{ evidence.discovered_at }}</dd></div>
+  </dl>
+</section>
+
+{{ integrity(evidence.fingerprint, none, none, verify_url) }}
+
+{{ blockchain_card(anchor) }}
+
+{{ evidence_details(summary) }}

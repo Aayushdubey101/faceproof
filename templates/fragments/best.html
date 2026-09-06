@@ -1,0 +1,140 @@
+{% from "components/status_chip.html" import status_chip %}
+{% set is_match = candidate.label == 'VERIFIED' or candidate.tone == 'ok' or candidate.status == 'MATCH' %}
+<section class="panel best">
+  <div class="best-media">
+    <div class="best-image">
+      <img src="{{ candidate.image }}" alt="{{ 'Best match' if is_match else 'Evaluated candidate' }}">
+    </div>
+
+    <!-- Candidate Priority (Kept strictly separate from verification) -->
+    <div class="priority-box">
+      <h3 class="priority-header">Candidate Priority</h3>
+      <div class="priority-row">
+        <span class="priority-pill">Rank #{{ candidate.rank if candidate.rank is not none else candidate.number }}</span>
+        <span class="source-badge" title="{{ candidate.source }}">{{ 'Social platform' if candidate.is_social else 'Web source' }}: {{ candidate.source }}</span>
+      </div>
+      <p class="priority-disclaimer">Ranking decides investigation priority only. Verification is decided solely by ArcFace cosine distance.</p>
+    </div>
+
+    <div class="best-actions">
+      {% if candidate.page_url %}
+      <a class="btn btn-primary" href="{{ candidate.page_url }}" target="_blank" rel="noreferrer noopener">View Original Post</a>
+      {% endif %}
+      {% if anchor and anchor.explorer %}
+      <a class="btn btn-outline" href="{{ anchor.explorer }}" target="_blank" rel="noreferrer noopener">View Blockchain Record</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="best-meta">
+    <div class="best-header-row">
+      {{ status_chip('VERIFIED MATCH' if is_match else candidate.label, 'ok' if is_match else candidate.tone) }}
+      <h2 class="best-title">{{ 'Best Match' if is_match else 'Best Candidate' }}</h2>
+    </div>
+
+    <!-- Verification Evidence -->
+    <div class="evidence-box">
+      <h3 class="evidence-box-title">Verification Evidence</h3>
+      <div class="evidence-grid">
+        <div class="evidence-item">
+          <span class="evidence-label">Cosine distance</span>
+          <span class="evidence-value mono">{{ '%.4f'|format(candidate.distance) if candidate.distance is not none else '—' }}</span>
+        </div>
+        <div class="evidence-item">
+          <span class="evidence-label">Threshold</span>
+          <span class="evidence-value mono">{{ '%.4f'|format(candidate.threshold) if candidate.threshold is not none else '—' }}</span>
+        </div>
+        <div class="evidence-item">
+          <span class="evidence-label">Decision margin</span>
+          <span class="evidence-value mono {{ 'margin-ok' if candidate.margin is not none and candidate.margin >= 0 else 'margin-bad' }}">
+            {{ candidate.margin_display if candidate.margin_display else '—' }}
+          </span>
+        </div>
+        <div class="evidence-item">
+          <span class="evidence-label">Decision</span>
+          <span class="evidence-value {{ 'decision-ok' if is_match else 'decision-bad' }}">
+            {{ 'MATCH' if is_match else candidate.label }}
+          </span>
+        </div>
+      </div>
+
+      {% if candidate.decision_rule %}
+      <div class="decision-rule-box">
+        <span class="rule-caption">Decision rule:</span>
+        <span class="rule-math mono">{{ candidate.decision_rule }}</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Visual Distance Scale (Honest 0.00 to 1.00 linear range) -->
+    {% if candidate.distance is not none and candidate.threshold is not none %}
+    <div class="scale-box">
+      <div class="scale-meta">
+        <span class="scale-heading">Cosine Distance Scale</span>
+        <span class="scale-sub mono">Linear scale [0.00 – 1.00]</span>
+      </div>
+      <div class="scale-visual">
+        <div class="scale-track">
+          <!-- Passing Region -->
+          <div class="scale-zone-pass" style="width: {{ candidate.threshold_percent }}%;"></div>
+          <!-- Threshold line -->
+          <div class="scale-line-thr" style="left: {{ candidate.threshold_percent }}%;">
+            <span class="thr-tag mono">{{ '%.2f'|format(candidate.threshold) }} thr</span>
+          </div>
+          <!-- Candidate Distance Marker -->
+          <div class="scale-pin {{ 'pin-pass' if is_match else 'pin-fail' }}" style="left: {{ candidate.distance_percent }}%;">
+            <div class="pin-marker"></div>
+            <span class="pin-text mono">{{ '%.4f'|format(candidate.distance) }}</span>
+          </div>
+        </div>
+        <div class="scale-labels">
+          <span class="scale-val mono">0.00</span>
+          <span class="scale-axis-name">Cosine distance</span>
+          <span class="scale-val mono">1.00</span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Why This Result? -->
+    <div class="reasons-box">
+      <h3 class="evidence-box-title">{{ 'Why it passed' if is_match else 'Why it failed' }}</h3>
+      <ul class="reasons-list">
+        {% if candidate.detailed_reasons %}
+          {% for ok, text in candidate.detailed_reasons %}
+          <li class="reason-row {{ 'reason-pass' if ok else 'reason-fail' }}">
+            <span class="reason-bullet">{{ '✓' if ok else '✕' }}</span>
+            <span class="reason-desc">{{ text }}</span>
+          </li>
+          {% endfor %}
+        {% else %}
+          {% for r in candidate.reasons %}
+          <li class="reason-row {{ 'reason-pass' if is_match else 'reason-fail' }}">
+            <span class="reason-bullet">{{ '✓' if is_match else '✕' }}</span>
+            <span class="reason-desc">{{ r }}</span>
+          </li>
+          {% endfor %}
+        {% endif %}
+      </ul>
+    </div>
+
+    <!-- How the decision was made (Forensic Trace) -->
+    {% if candidate.trace %}
+    <details class="trace-details">
+      <summary class="trace-summary">
+        <span class="trace-title">How the decision was made</span>
+        <span class="trace-count mono">{{ candidate.trace|length }} steps</span>
+      </summary>
+      <ol class="trace-flow">
+        {% for step_num, step_desc, step_ok in candidate.trace %}
+        <li class="trace-node {{ 'trace-ok' if step_ok else 'trace-bad' }}">
+          <span class="trace-num mono">{{ step_num }}</span>
+          <span class="trace-label">{{ step_desc }}</span>
+          <span class="trace-icon">{{ '✓' if step_ok else '✕' }}</span>
+        </li>
+        {% endfor %}
+      </ol>
+    </details>
+    {% endif %}
+  </div>
+</section>

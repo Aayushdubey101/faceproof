@@ -1,0 +1,76 @@
+{# Everything the evidence file carries, folded away until asked for.
+
+   Driven entirely by faceproof.evidence.provenance.summary(), which drops any
+   field the document does not have - so a row is only ever drawn for a value
+   that exists. Nothing here reads configuration or credentials.
+#}
+{% macro row(label, value, wide=false) -%}
+{% if value %}
+<div{% if wide %} class="kv-wide"{% endif %}>
+  <dt>{{ label }}</dt>
+  <dd{% if wide %} class="mono break"{% endif %}>{{ value }}</dd>
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro evidence_details(summary) -%}
+<details class="panel details">
+  <summary class="details-summary">
+    <span class="panel-glyph">&#9636;</span>Evidence Details
+    <span class="details-hint">full manifest values</span>
+  </summary>
+
+  <div class="details-body">
+    <section class="details-group">
+      <h3 class="details-title">Probe</h3>
+      <dl class="kv kv-stack">
+        {{ row('Model', summary.model) }}
+        {{ row('Detector', summary.detector) }}
+        {{ row('Embedding', summary.embedding_dimensions and summary.embedding_dimensions ~ ' dimensions') }}
+        {{ row('Probe SHA-256', summary.probe_sha256, wide=true) }}
+      </dl>
+    </section>
+
+    <section class="details-group">
+      <h3 class="details-title">Match</h3>
+      <dl class="kv kv-stack">
+        {{ row('Source', summary.matched_source) }}
+        {{ row('Distance', summary.distance) }}
+        {{ row('Threshold', summary.threshold) }}
+        {{ row('Metric', summary.metric) }}
+        {{ row('URL', summary.matched_url, wide=true) }}
+      </dl>
+    </section>
+
+    <section class="details-group">
+      <h3 class="details-title">Search</h3>
+      <dl class="kv kv-stack">
+        {{ row('Provider', summary.search_provider) }}
+        {{ row('Candidates discovered', summary.candidates_discovered) }}
+        {{ row('Candidates investigated', summary.candidates_investigated) }}
+      </dl>
+    </section>
+
+    <section class="details-group">
+      <h3 class="details-title">Integrity</h3>
+      <dl class="kv kv-stack">
+        {{ row('Evidence SHA-256', summary.fingerprint, wide=true) }}
+        {{ row('Matched image SHA-256', summary.matched_image_sha256, wide=true) }}
+        {{ row('Search response SHA-256', summary.search_response_sha256, wide=true) }}
+        {{ row('On-chain digest', summary.onchain_digest, wide=true) }}
+        {{ row('Audit result', summary.audit_result) }}
+      </dl>
+    </section>
+
+    <section class="details-group">
+      <h3 class="details-title">Blockchain</h3>
+      <dl class="kv kv-stack">
+        {{ row('Network', summary.network) }}
+        {{ row('Chain ID', summary.chain_id) }}
+        {{ row('Block', summary.block_number) }}
+        {{ row('Transaction', summary.tx_hash, wide=true) }}
+      </dl>
+    </section>
+  </div>
+</details>
+{%- endmacro %}

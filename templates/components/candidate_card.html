@@ -1,0 +1,53 @@
+{% from "components/status_chip.html" import status_chip %}
+
+{# One investigated candidate: what was checked, and what the face model decided. #}
+{% macro candidate_card(candidate) -%}
+<article class="cand cand-{{ candidate.tone }}">
+  <div class="cand-thumb">
+    <img src="{{ candidate.image }}" alt="Candidate {{ candidate.number }}" loading="lazy">
+    <span class="cand-index">#{{ candidate.number }}</span>
+  </div>
+  <div class="cand-body">
+    <div class="cand-head">
+      <div class="cand-priority">
+        <span class="priority-tag" title="Candidate search ranking">Rank #{{ candidate.rank if candidate.rank is not none else candidate.number }}</span>
+        <span class="source-badge" title="{{ candidate.source }}">{{ candidate.source }}</span>
+      </div>
+      {{ status_chip(candidate.label, candidate.tone) }}
+    </div>
+
+    {% if candidate.distance is not none %}
+    <div class="cand-verification-box">
+      <div class="cand-stat-row">
+        <div class="cand-stat"><span class="cand-stat-label">Distance</span><span class="mono">{{ '%.4f'|format(candidate.distance) }}</span></div>
+        <div class="cand-stat"><span class="cand-stat-label">Threshold</span><span class="mono">{{ '%.4f'|format(candidate.threshold) if candidate.threshold is not none else '0.6800' }}</span></div>
+        <div class="cand-stat">
+          <span class="cand-stat-label">Margin</span>
+          <span class="mono {{ 'margin-ok' if candidate.margin is not none and candidate.margin >= 0 else 'margin-bad' }}">
+            {{ candidate.margin_display if candidate.margin_display else '—' }}
+          </span>
+        </div>
+      </div>
+      {% if candidate.decision_rule %}
+      <div class="cand-rule mono">{{ candidate.decision_rule }}</div>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="cand-unperformed">
+      {% if candidate.status == 'NO_FACE' %}
+      <span class="unperformed-text">Face verification unavailable</span>
+      {% elif candidate.status == 'DOWNLOAD_FAILED' %}
+      <span class="unperformed-text">Face verification not performed</span>
+      {% else %}
+      <span class="unperformed-text">Face verification unperformed</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <p class="cand-reason">{{ candidate.reason }}</p>
+    {% if candidate.page_url %}
+    <a class="btn btn-ghost btn-sm" href="{{ candidate.page_url }}" target="_blank" rel="noreferrer noopener">Open source</a>
+    {% endif %}
+  </div>
+</article>
+{%- endmacro %}
