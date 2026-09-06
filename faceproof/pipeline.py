@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from faceproof.blockchain import registry
 from faceproof.blockchain import verifier as chain_verifier
 from faceproof.discovery import DiscoveryError, retrieval
+from faceproof.discovery import candidates as candidate_ranking
 from faceproof.discovery.reverse_search import SEARCH_ENGINE_ID, reverse_search
 from faceproof.evidence import hashing, manifest
 from faceproof.face import adapter
@@ -84,10 +85,16 @@ def run(
     candidates, search_response = reverse_search(probe_url)
     if not candidates:
         raise DiscoveryError(SEARCH_ENGINE_ID, "the search returned no candidates for this probe")
+    # candidates arrive normalized, deduplicated and ranked by investigation
+    # priority, so the budget below is spent on the most promising results
+    discovered = candidate_ranking.discovered_count(candidates)
     social = sum(1 for candidate in candidates if candidate.is_social)
-    print(f"      {TICK} Candidates found    {len(candidates)} ({social} on social platforms)")
+    print(f"      {TICK} Candidates found    {discovered} ({social} on social platforms)")
+    if discovered > len(candidates):
+        print(f"      {TICK} Duplicates merged   {len(candidates)} unique candidates remain")
     if investigation is not None:
-        investigation.discovered = len(candidates)
+        investigation.discovered = discovered
+        investigation.unique = len(candidates)
 
     print(f"[3/5] Candidate verification (up to {max_candidates} candidates)")
     work_dir = tempfile.mkdtemp(prefix="faceproof-")
@@ -123,7 +130,7 @@ def run(
         search_engine=SEARCH_ENGINE_ID,
         probe_image_url=probe_url,
         search_response=search_response,
-        candidates_returned=len(candidates),
+        candidates_returned=discovered,
         candidates_checked=min(max_candidates, len(candidates)),
     )
     digest = hashing.fingerprint(evidence)
