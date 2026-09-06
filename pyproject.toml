@@ -41,7 +41,6 @@ dependencies = [
     "lightdsa>=0.0.3",
     "python-dotenv>=1.0.1",
     "web3>=6.0.0",
-    "streamlit>=1.63.0",
 ]
 
 [project.optional-dependencies]

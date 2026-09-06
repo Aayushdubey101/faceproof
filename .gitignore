@@ -49,5 +49,12 @@ weights/
 /outputs/
 /evidence/
 tests/unit/dataset/*.pkl
+bench/mirror/
+bench/results/
+
+# --- Licences and Documentation (ignored per user requirement) ---
 *.md
+**/*.md
 LICENSE
+LICENSE*
+**/LICENSE*
