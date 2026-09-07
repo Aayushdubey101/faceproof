@@ -1,7 +1,8 @@
 """Where does one candidate comparison actually spend its time?
 
-Task 2 removed the download from the critical path and Task 3 decided which
-candidates are worth comparing, which leaves face comparison as ~99% of a run.
+Download prefetching removed the download from the critical path and candidate
+ranking decided which candidates are worth comparing, which leaves face
+comparison as ~99% of a run.
 This script takes that number apart, per candidate and per stage, before
 anything is optimized.
 

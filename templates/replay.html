@@ -107,7 +107,7 @@
   </div>
 </section>
 
-<!-- Task 6: Explainable Match Scoring (Reused for Best Match) -->
+<!-- Explainable match scoring (reused for the best match) -->
 {% with candidate = replay.best_candidate, model = replay.match.model or 'ArcFace', anchor = anchor_json %}
   {% include "fragments/best.html" %}
 {% endwith %}
@@ -130,7 +130,7 @@
 </section>
 {% endif %}
 
-<!-- Task 5: Recorded Investigation Provenance -->
+<!-- Recorded investigation provenance -->
 {{ provenance(replay.events, title="Recorded Investigation Provenance", subtitle="These events occurred during the original investigation and are reconstructed from persisted evidence.") }}
 
 <!-- Blockchain Anchor Card -->

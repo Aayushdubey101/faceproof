@@ -1794,7 +1794,7 @@ def test_best_match_card_renders_full_explanation():
 
 
 # -----------------------------------------------------------------------------
-# TASK 7 — Cached Investigation & Deterministic Replay Tests
+# Cached investigation & deterministic replay tests
 # -----------------------------------------------------------------------------
 
 from faceproof.evidence.replay import (

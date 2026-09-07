@@ -52,9 +52,11 @@ tests/unit/dataset/*.pkl
 bench/mirror/
 bench/results/
 
-# --- Licences and Documentation (ignored per user requirement) ---
-*.md
-**/*.md
-LICENSE
-LICENSE*
-**/LICENSE*
+# --- Local-only docs (not part of the published project) ---
+/DEMO.md
+/PROJECT.md
+
+# --- Root project licence (not published yet). The vendored engine's
+# --- licence (face_engine/LICENSE) IS tracked - MIT requires shipping it.
+/LICENSE
+/LICENSE.*

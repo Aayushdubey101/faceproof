@@ -42,7 +42,7 @@ def provider_order(candidates: Sequence[Candidate]) -> List[Candidate]:
 
 
 def legacy_order(candidates: Sequence[Candidate]) -> List[Candidate]:
-    """Ordering before this task: social first, then the provider's position."""
+    """Ordering before the ranking stage: social first, then the provider's position."""
     return sorted(candidates, key=lambda one: (not one.is_social, one.position))
 
 

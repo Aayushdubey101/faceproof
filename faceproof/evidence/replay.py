@@ -151,7 +151,7 @@ def _build_candidate_card_dict(
     threshold = winning_match.get("threshold") if is_winning_match else None
     model = winning_match.get("model") if is_winning_match else "ArcFace"
 
-    # Derive Task 6 presentation explanation without running any ML models
+    # Derive the presentation explanation without running any ML models
     if is_winning_match and distance is not None:
         explanation = explain_candidate(
             status=MATCH,
